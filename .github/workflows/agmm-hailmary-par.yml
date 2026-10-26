@@ -1,0 +1,240 @@
+name: AGMM hailmary parallel
+run-name: AGMM hailmary par ${{ inputs.label }}
+# Hail Mary shorts, fast path (26 Oct 2026): build once, render the picture in up to 20 parallel segments at device scale 2 (2160x3840 from pages authored at 1080x1920 CSS px), split by measured cost per frame (the clone crowd is the slow part) (OpenFilm, headless Chromium),
+# join them, mix the sound with the project's own mix.py (designed arc: build-up, riser, hit, ducking), master to -14 LUFS, run qa.py.
+# The project and its sounds come from the PRIVATE repo via the read-only deploy key. Nothing renders on the Mac; no media is committed here.
+on:
+  workflow_dispatch:
+    inputs:
+      private_commit: { description: 40-hex commit of agmm-video-render holding the film folder, required: true }
+      project_path: { description: film folder inside that commit, required: true }
+      voice_run_id: { description: voicefree-chatterbox run id with the takes, required: true }
+      voice_label: { description: label of that run, required: true }
+      voice_repo: { description: 'repo that holds the voicefree-chatterbox run(s) (owner/name); the pack is AES-encrypted with that repo VOICEFREE_PASS, so this repo VOICEFREE_PASS must match', required: false, default: agmmltd-arch/agmm-render-public }
+      label: { description: short label, required: true }
+      pick: { description: forced takes e.g. P1=2,P4=1, required: false, default: '' }
+      voice2_run_id: { description: optional second voicefree run whose takes replace the same paragraphs, required: false, default: '' }
+      voice2_label: { description: label of that run, required: false, default: '' }
+      extra_voices: { description: 'more voicefree runs, later ones win per paragraph, space-separated run_id:label', required: false, default: '' }
+      segments: { description: number of parallel picture segments (max 20), required: false, default: '20' }
+      scale: { description: 'device scale factor passed to openfilm render --scale: 2 = 2160x3840 (pages stay 1080x1920 CSS px), 1 = 1080x1920', required: false, default: '2' }
+      reuse_picture_run: { description: 'run id whose picture segments to reuse (timeline AND scale must be identical)', required: false, default: '' }
+      cuts: { description: 'optional explicit segment cut frames, comma-separated, first 0 and last = total frames (keeps reused segments aligned when the film length changes)', required: false, default: '' }
+      rerender_from: { description: 'with reuse_picture_run: re-render segments ending after this second, reuse the rest (empty = reuse all)', required: false, default: '' }
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agmm-hailmary-par-${{ inputs.label }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      total: ${{ steps.b.outputs.total }}
+      world_at: ${{ steps.b.outputs.world_at }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+      - name: Runtime (static ffmpeg, no apt)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+      - name: Voice pack (decrypt)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VOICEFREE_PASS: ${{ secrets.VOICEFREE_PASS }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.voice_run_id }}" -R "${{ inputs.voice_repo }}" -n "voicefree-chatterbox-${{ inputs.voice_label }}-ENC" -D "$RUNNER_TEMP/vpack"
+          mkdir -p "$RUNNER_TEMP/voice"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice"
+          n=3
+          for rl in ${{ inputs.extra_voices }}; do
+            rid=${rl%%:*}; lab=${rl#*:}
+            gh run download "$rid" -R "${{ inputs.voice_repo }}" -n "voicefree-chatterbox-$lab-ENC" -D "$RUNNER_TEMP/vpack$n"
+            mkdir -p "$RUNNER_TEMP/voice$n"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack$n/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice$n"
+            n=$((n+1))
+          done
+          if [ -n "${{ inputs.voice2_run_id }}" ]; then
+            gh run download "${{ inputs.voice2_run_id }}" -R "${{ inputs.voice_repo }}" -n "voicefree-chatterbox-${{ inputs.voice2_label }}-ENC" -D "$RUNNER_TEMP/vpack2"
+            mkdir -p "$RUNNER_TEMP/voice2"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack2/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice2"
+          fi
+      - id: b
+        name: Build the edit and the mix plan on the voice
+        run: |
+          set -euo pipefail
+          cp -r "private/${{ inputs.project_path }}" film
+          cd film
+          V2=""; for d in $(ls -d "$RUNNER_TEMP"/voice[0-9]* 2>/dev/null | sort -V); do V2="$V2 $d"; done; [ -n "$V2" ] && V2="--voice2$V2"
+          python3 build_film.py --voice "$RUNNER_TEMP/voice" $V2 --pick "${{ inputs.pick }}"
+          echo "total=$(python3 -c "import json;print(json.load(open('assets/timeline.json'))['total'])")" >> "$GITHUB_OUTPUT"
+          echo "world_at=$(python3 -c "import json;print(json.load(open('assets/timeline.json'))['world_at'])")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: film-${{ inputs.label }}
+          path: film
+          retention-days: 1
+          include-hidden-files: true
+  picture:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        seg: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: film-${{ inputs.label }}
+          path: film
+      - id: rng
+        name: This segment's frame-exact range, and whether to reuse it
+        run: |
+          set -euo pipefail
+          cd film
+          read A B < <(python3 -c "
+          import json; tl=json.load(open('assets/timeline.json')); A=tl['a']; T=tl['total']; W=tl['world_at']
+          R=tl.get('choreo',{}).get('t',{}).get('reveal_end',W+1.2)
+          N=min(28,int('${{ inputs.segments }}')); i=${{ matrix.seg }}
+          fr=30; frames=int(round(T*fr))
+          # measured on Actions, 4 vCPU, 1 worker (26 Oct): s/frame 1x -> 2x: crowd 12.4 -> 30.9, eye reveal (full-frame raymarch) 1.3 -> 6.5, Alfred 0.43 -> 1.65; opening taken as crowd/2.6
+          SC=float('${{ inputs.scale }}'); hi=SC>=1.5
+          def cost(t): return 1.0 if t<A['ten'] else (2.6 if t<W else ((0.55 if hi else 0.27) if t<R else (0.14 if hi else 0.09)))
+          cs=[cost(f/fr) for f in range(frames)]; tot=sum(cs); cuts=[0]; acc=0.0
+          for f,c in enumerate(cs):
+              acc+=c
+              if len(cuts)<N and acc>=tot*len(cuts)/N: cuts.append(f+1)
+          cuts=cuts[:N]+[frames]; cuts+=[frames]*(29-len(cuts))
+          X='${{ inputs.cuts }}'.strip()
+          if X:
+              # "c0,c1,...,ck+M": keep these cut frames (the reused segments), then split the rest of THIS film into M by cost
+              head, _, m = X.partition('+'); keep=[int(v) for v in head.split(',')]
+              if m:
+                  M=int(m); tail=cs[keep[-1]:]; tt=sum(tail); acc=0.0; add=[]
+                  for j,c in enumerate(tail):
+                      acc+=c
+                      if len(add)<M-1 and acc>=tt*(len(add)+1)/M: add.append(keep[-1]+j+1)
+                  keep=keep+add+[frames]
+              cuts=keep; N=len(cuts)-1; cuts+=[cuts[-1]]*(29-len(cuts))
+          a,b=(cuts[i],cuts[i+1]) if i<N else (frames,frames)
+          print('%.4f %.4f'%(a/fr,b/fr))")
+          echo "a=$A" >> "$GITHUB_OUTPUT"; echo "b=$B" >> "$GITHUB_OUTPUT"
+          R=no
+          if [ -n "${{ inputs.reuse_picture_run }}" ]; then
+            F="${{ inputs.rerender_from }}"; [ -z "$F" ] && F=99999
+            python3 -c "import sys; sys.exit(0 if float('$B') <= float('$F') else 1)" && R=yes
+          fi
+          echo "reuse=$R" >> "$GITHUB_OUTPUT"; echo "segment ${{ matrix.seg }}: $A - $B reuse=$R"
+      - name: Reuse this segment from the earlier run
+        if: steps.rng.outputs.reuse == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # the earlier run may still be rendering this segment: wait for its artifact (up to 60 min)
+          for i in $(seq 1 60); do
+            rm -rf segraw
+            gh run download "${{ inputs.reuse_picture_run }}" -R "${{ github.repository }}" -p "seg-*-${{ matrix.seg }}" -D segraw 2>/dev/null || true
+            if find segraw -name "seg_${{ matrix.seg }}.mp4" | grep -q .; then break; fi
+            echo "waiting for segment ${{ matrix.seg }} of run ${{ inputs.reuse_picture_run }} ($i)"; sleep 60
+          done
+          find segraw -name "seg_${{ matrix.seg }}.mp4" -exec cp {} . \; 2>/dev/null || true
+          ls seg_${{ matrix.seg }}.mp4
+          ls -la seg_*.mp4 || true
+      - name: Runtime (static ffmpeg, Node 22)
+        if: steps.rng.outputs.reuse != 'yes'
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/node-v22.12.0-linux-x64/bin" >> "$GITHUB_PATH"
+      - name: Render this segment (frame-exact range)
+        if: steps.rng.outputs.reuse != 'yes'
+        run: |
+          set -euo pipefail
+          cd film
+          A=${{ steps.rng.outputs.a }}; B=${{ steps.rng.outputs.b }}
+          if python3 -c "import sys; sys.exit(0 if float('$A') < float('$B') else 1)"; then
+            # page loads can flake at 2x (an aborted asset fetch, "window.film did not appear"): retry up to 3 times
+            ok=0
+            for try in 1 2 3; do
+              if timeout 3000 npx -y openfilm@0.2.5 render "$A-$B" --scale "${{ inputs.scale }}" --out "../seg_${{ matrix.seg }}.mp4" > render.log 2>&1; then ok=1; break; fi
+              echo "attempt $try failed:"; tail -5 render.log; sleep 8
+            done
+            tail -6 render.log
+            [ "$ok" = 1 ] || exit 1
+          fi
+          ls -la ../seg_*.mp4 || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: seg-${{ inputs.label }}-${{ matrix.seg }}
+          path: seg_*.mp4
+          retention-days: 1
+          if-no-files-found: ignore
+  assemble:
+    needs: [build, picture]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: film-${{ inputs.label }}
+          path: film
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: seg-${{ inputs.label }}-*
+          path: segs
+          merge-multiple: true
+      - name: Runtime (static ffmpeg, Pillow, RapidOCR)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --quiet --retries 4 pillow rapidocr-onnxruntime==1.3.24
+      - name: Join picture, mix sound, master, QA
+        run: |
+          set -euo pipefail
+          ls -la segs
+          for f in $(ls segs/seg_*.mp4 | sort -V); do echo "file '$PWD/$f'" ; done > list.txt
+          ffmpeg -nostdin -y -loglevel error -f concat -safe 0 -i list.txt -an -c:v libx264 -preset slow -crf 15 -profile:v high -level 5.2 -pix_fmt yuv420p -r 30 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv picture.mp4
+          cd film && python3 mix.py mix.json ../mix.wav && cd ..
+          # master: a straight gain to -14 LUFS plus a peak limiter, twice. Two-pass loudnorm fell back to its dynamic mode
+          # and flattened every hit to voice level (26 Oct), which is the 'monotone' Sam heard.
+          LUFS() { ffmpeg -nostdin -i "$1" -af ebur128 -f null - 2>&1 | grep -E '^\s+I:' | tail -1 | awk '{print $2}'; }
+          I1=$(LUFS mix.wav); G1=$(python3 -c "print(-14-($I1))")
+          ffmpeg -nostdin -y -loglevel error -i mix.wav -af "volume=${G1}dB,alimiter=limit=0.78:attack=1:release=60:level=disabled" -c:a pcm_f32le m1.wav
+          I2=$(LUFS m1.wav); G2=$(python3 -c "print(-14-($I2))"); echo "master: mix $I1 LUFS, gain $G1, after limit $I2, trim $G2"
+          ffmpeg -nostdin -y -loglevel error -i picture.mp4 -i m1.wav -map 0:v -map 1:a -c:v copy -af "volume=${G2}dB,alimiter=limit=0.78:attack=1:release=60:level=disabled,aresample=48000" -c:a aac -b:a 256k -shortest -movflags +faststart FINAL.mp4
+          # qa.py was written and calibrated at 1080x1920 (frame-size check, OCR box heights), so it gets a lanczos 1080 copy of the master
+          ffmpeg -nostdin -y -loglevel error -i FINAL.mp4 -vf scale=1080:1920:flags=lanczos -c:v libx264 -preset veryfast -crf 14 -pix_fmt yuv420p -c:a copy QA.mp4
+          python3 film/qa.py QA.mp4 film/assets/timeline.json qa | tee qa.txt
+          # a phone-sized share copy (under 30 MB): the 4K master supersampled to 1080x1920 with lanczos, which beats 4K squeezed to the same bitrate
+          ffmpeg -nostdin -y -loglevel error -i FINAL.mp4 -vf scale=1080:1920:flags=lanczos -c:v libx264 -preset slow -crf 22 -maxrate 4.5M -bufsize 9M -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -c:a aac -b:a 160k -movflags +faststart SHARE.mp4 || true
+          ls -la FINAL.mp4 SHARE.mp4 || true
+          cp film/BUILD.json film/assets/timeline.json film/film.html film/mix.json qa/ 2>/dev/null || true
+          rm -rf qa/f10 qa/f2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: hailmary-${{ inputs.label }}
+          path: |
+            FINAL.mp4
+            SHARE.mp4
+            qa
+          retention-days: 7
