@@ -1,0 +1,24 @@
+name: xrepo probe
+run-name: xrepo probe
+# Checks that this pool's GITHUB_TOKEN can download a public artifact from pool A (what voice_repo needs). Downloads one small artifact, prints sizes only.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: run id in the source repo, required: true }
+      artifact: { description: artifact name, required: true }
+      repo: { description: source repo, required: false, default: agmmltd-arch/agmm-render-public }
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.run_id }}" -R "${{ inputs.repo }}" -n "${{ inputs.artifact }}" -D "$RUNNER_TEMP/x"
+          ls -la "$RUNNER_TEMP/x"
