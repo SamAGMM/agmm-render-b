@@ -25,7 +25,10 @@ def post_process(wav, words_json, post):
     os.remove(tmp)
     from faster_whisper import WhisperModel
     m = WhisperModel("small.en", device="cpu", compute_type="int8")
-    segs, _ = m.transcribe(wav, language="en", word_timestamps=True, beam_size=5, condition_on_previous_text=False)
+    w16 = wav + ".16k.wav"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", wav, "-ar", "16000", "-ac", "1", w16], check=True)
+    a16, _ = sf.read(w16, dtype="float32"); os.remove(w16)
+    segs, _ = m.transcribe(a16, language="en", word_timestamps=True, beam_size=5, condition_on_previous_text=False)
     words = [{"type": "transcription_segment", "text": ww.word.strip(), "start": round(float(ww.start), 3), "end": round(float(ww.end), 3)} for sg in segs for ww in (sg.words or []) if ww.word.strip()]
     d = json.load(open(words_json)); d["segments"] = words; d["text"] = " ".join(v["text"] for v in words); d["model"] = "faster-whisper-small.en (post-processed)"
     json.dump(d, open(words_json, "w"), indent=2)
