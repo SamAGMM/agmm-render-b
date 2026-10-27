@@ -97,6 +97,11 @@ def main():
                 f = atempo(f, eng.sr, float(fr.get("tempo", 1.0)))
                 if fr.get("gain_db"):
                     f = f * (10 ** (float(fr["gain_db"]) / 20.0))
+                if fr.get("tail_gain_db"):          # lift only the last tail_s seconds (the reveal words), 80 ms ramp in
+                    n = int(float(fr.get("tail_s", 0.6)) * eng.sr); r = min(int(0.08 * eng.sr), n // 2)
+                    g = np.ones(len(f), dtype="float32"); lin = 10 ** (float(fr["tail_gain_db"]) / 20.0)
+                    g[-n:] = lin; g[-n:-n + r] = np.linspace(1.0, lin, r)
+                    f = f * g
                 pieces.append(f)
                 frag_times.append({"i": fi, "start": round(cur, 3), "end": round(cur + len(f) / eng.sr, 3)})
                 cur += len(f) / eng.sr
