@@ -21,6 +21,7 @@ on:
       runner: { description: 'runs-on label for the picture segment jobs. ubuntu-24.04 starves when GitHub is short of runners; ubuntu-22.04 is the same x64 hardware and Chromium and was picked up in about 70 s', required: false, default: ubuntu-22.04 }
       runner_misc: { description: 'runs-on label for the build and assemble jobs', required: false, default: ubuntu-22.04 }
       workers: { description: 'browsers per segment job (4 vCPU). 2 is the fastest measured: 1.4 to 1.8x over openfilm default (1 for short segments, 3 for long ones); frames identical for any count', required: false, default: '2' }
+      join: { description: 'copy (default) = join the segments by stream copy: no second lossy encode (proved 27 Oct on a real 4K run: exact frame count, every seam frame equals the segment own frame, PSNR vs the lossless render +1.3 dB over the re-encode). encode = the old x264 slow crf 15 re-encode', required: false, default: copy }
       scale: { description: 'device scale factor passed to openfilm render --scale: 2 = 2160x3840 (pages stay 1080x1920 CSS px), 1 = 1080x1920', required: false, default: '2' }
       reuse_picture_run: { description: 'run id whose picture segments to reuse (timeline AND scale must be identical)', required: false, default: '' }
       cuts: { description: 'optional explicit segment cut frames, comma-separated, first 0 and last = total frames (keeps reused segments aligned when the film length changes)', required: false, default: '' }
@@ -228,7 +229,18 @@ jobs:
           for f in $(ls segs/seg_*.mp4 | sort -V); do echo "file '$PWD/$f'" ; done > list.txt
           mkdir -p gate-input/stems
           # 1. the 4K join (the long pole: x264 slow, crf 15) starts now and runs while everything it does not need is prepared
-          ( ffmpeg -nostdin -y -loglevel error -f concat -safe 0 -i list.txt -an -c:v libx264 -preset slow -crf 15 -profile:v high -level 5.2 -pix_fmt yuv420p -r 30 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv picture.mp4; stamp "picture.mp4 done" ) &
+          join_encode() {
+            ffmpeg -nostdin -y -loglevel error -f concat -safe 0 -i list.txt -an -c:v libx264 -preset slow -crf 15 -profile:v high -level 5.2 -pix_fmt yuv420p -r 30 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv picture.mp4
+          }
+          join_picture() {
+            if [ "${{ inputs.join }}" = "encode" ]; then join_encode; return; fi
+            ffmpeg -nostdin -y -loglevel error -f concat -safe 0 -i list.txt -an -c:v copy -movflags +faststart picture.mp4
+            N_SEG=$(for f in $(ls segs/seg_*.mp4 | sort -V); do ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=nb_read_packets -of csv=p=0 "$f"; done | awk '{s+=$1} END {print s}')
+            N_OUT=$(ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=nb_read_packets -of csv=p=0 picture.mp4)
+            echo "copy join: $N_OUT frames from $N_SEG in the segments"
+            if [ "$N_SEG" != "$N_OUT" ] || [ -z "$N_OUT" ] || [ "$N_OUT" = 0 ]; then echo "copy join frame count mismatch: falling back to the re-encode"; join_encode; fi
+          }
+          ( join_picture; stamp "picture.mp4 done" ) &
           PV=$!
           # 2. Python packages for qa.py (as before, before any python tool runs), then the Whisper venv in the background
           python3 -m pip install --quiet --retries 4 pillow rapidocr-onnxruntime==1.3.24
