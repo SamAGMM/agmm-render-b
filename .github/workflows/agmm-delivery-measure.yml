@@ -7,6 +7,7 @@ on:
       voice_run_id: { description: voicefree run id, required: true }
       voice_label: { description: label of that run, required: true }
       label: { description: short label, required: true }
+      must_json: { description: 'optional JSON {key:[phrases]} exact-phrase checks', required: false, default: '' }
       cls_map: { description: 'optional key=class list e.g. P6=turn,P7=ad,P8=cta', required: false, default: '' }
 permissions:
   contents: read
@@ -50,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           . "$RUNNER_TEMP/venv/bin/activate"
-          CLS_MAP='${{ inputs.cls_map }}' python .github/scripts/delivery/delivery_pack_measure.py "$RUNNER_TEMP/voice" out
+          CLS_MAP='${{ inputs.cls_map }}' MUST_JSON='${{ inputs.must_json }}' python .github/scripts/delivery/delivery_pack_measure.py "$RUNNER_TEMP/voice" out
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

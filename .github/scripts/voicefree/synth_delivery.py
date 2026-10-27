@@ -36,6 +36,19 @@ def atempo(a, sr, f):
     return y
 
 
+def _must(phrases, a, b):
+    import re as _re
+    sq = lambda t: _re.sub(r"[^a-z0-9]", "", (t or "").lower().replace("a i ", "ai ").replace("a.i.", "ai"))
+    out = {}
+    for p in phrases:
+        if p.startswith("re:"):
+            f = lambda s, p=p: bool(_re.search(p[3:], s))
+        else:
+            f = lambda s, p=p: sq(p) in s
+        out[p] = {"medium": f(sq(a)), "small": f(sq(b))}
+    return out
+
+
 def _recall(script, a, b):
     """numbers only: share of script words found in the ASR text (best of the two transcribers), and whether the first/last three script words are all there"""
     import re as _re
@@ -168,7 +181,7 @@ def main():
                 print("measure failed", stem, repr(e)[:200], flush=True); pub = {"error": repr(e)[:200]}
             pub.update({"key": key, "take": takei, "cls": para.get("cls"), "dur_s": info["duration_s"], "wpm_native": wpm_native, "span_wpm": swpm, "asr_match": bool(ok), "native_ratio": nat_ratio,
                         "brand": brand, "frags": frag_times, "variant_idx": (takei - 1) % len(vars_), "sim_ref": sims, "spot_fail": len(sp_bad), "render_s": render_s,
-                        "n_script_words": len(text.split()), "recall": _recall(text, resp["text"], resp_s["text"])})
+                        "n_script_words": len(text.split()), "recall": _recall(text, resp["text"], resp_s["text"]), "must": _must(para.get("must_hear") or [], resp["text"], resp_s["text"])})
             json.dump(pub, open(os.path.join(a.pub, stem + ".delivery.json"), "w"))
             row = {"key": key, "take": takei, "dur_s": info["duration_s"], "wpm_native": wpm_native, "span_wpm": swpm, "asr_match": bool(ok), "render_s": render_s, "sim_ref": sims, "chunks": len(var["frags"]),
                    "native_ratio": nat_ratio, "sim_baseline": None}

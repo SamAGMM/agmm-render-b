@@ -23,6 +23,19 @@ def _recall(script, a, b):
     return out
 
 
+import json as _json
+MUST = _json.loads(os.environ.get("MUST_JSON") or "{}")
+
+
+def _must(phrases, a, b):
+    sq = lambda t: re.sub(r"[^a-z0-9]", "", (t or "").lower().replace("a i ", "ai ").replace("a.i.", "ai"))
+    out = {}
+    for p in phrases:
+        f = (lambda s, p=p: bool(re.search(p[3:], s))) if p.startswith("re:") else (lambda s, p=p: sq(p) in s)
+        out[p] = {"medium": f(sq(a)), "small": f(sq(b))}
+    return out
+
+
 def sanitize(m):
     out = {k: v for k, v in m.items() if k not in ("words", "sentences", "gaps_ge_0p15", "numbers", "overall", "sections", "turn_tail", "name")}
     out["overall"] = {k: v for k, v in m["overall"].items() if k != "text"}
@@ -48,7 +61,7 @@ def main():
         key, take = stem.split(".t")[0], int(stem.split(".t")[1])
         pub.update({"key": key, "take": take, "cls": CLS.get(key, "story"), "dur_s": rc["wav_info"]["duration_s"], "wpm_native": rc.get("wpm"), "span_wpm": rc.get("span_wpm"),
                     "asr_match": rc.get("asr_match"), "native_ratio": rc.get("native_ratio"), "brand": {"agm": bool(BRAND_AGM.search(asr)), "agmm_letters": bool(BRAND_AGMM.search(asr))},
-                    "frags": rc.get("frags"), "variant_idx": rc.get("tts_variant"), "sim_ref": rc.get("speaker_sim"), "spot_fail": len(rc.get("spot_fail") or []), "n_script_words": len(rc["text"].split()), "recall": _recall(rc["text"], rc.get("asr_text") or "", (rc.get("asr_variants") or {}).get("small.en") or ""),
+                    "frags": rc.get("frags"), "variant_idx": rc.get("tts_variant"), "sim_ref": rc.get("speaker_sim"), "spot_fail": len(rc.get("spot_fail") or []), "n_script_words": len(rc["text"].split()), "must": _must(MUST.get(key, []), rc.get("asr_text") or "", (rc.get("asr_variants") or {}).get("small.en") or ""), "recall": _recall(rc["text"], rc.get("asr_text") or "", (rc.get("asr_variants") or {}).get("small.en") or ""),
                     "tail_heard": (" ".join((rc.get("asr_text") or "").split()[-4:]) + " | " + " ".join(((rc.get("asr_variants") or {}).get("small.en") or "").split()[-4:])) if CLS.get(key) in ("turn", "cta") else None})
         json.dump(pub, open(os.path.join(out, stem + ".delivery.json"), "w"))
         print(stem, "ok", flush=True)
