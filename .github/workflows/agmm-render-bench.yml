@@ -1,0 +1,83 @@
+name: AGMM render bench
+run-name: AGMM render bench ${{ inputs.label }}
+# Render-speed bench (27 Oct 2026). Renders the same dense span of an existing film with different browser counts, samples the CPU, and
+# writes the md5 of every decoded frame so the configurations can be compared for identical pixels. Lossless x264 (qp 0) so the encoder adds nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      film_run: { description: 'run id holding the artifact film-<film_label> (this repo)', required: true }
+      film_label: { description: label of that run, required: true }
+      label: { description: short label, required: true }
+      nframes: { description: frames in the span, required: false, default: '12' }
+      start_s: { description: 'span start in seconds (empty = middle of the crowd stretch)', required: false, default: '' }
+      scale: { description: device scale, required: false, default: '2' }
+      configs: { description: 'JSON list of worker counts', required: false, default: '[1,2,3,4]' }
+permissions:
+  contents: read
+  actions: read
+jobs:
+  bench:
+    if: github.repository == 'agmmltd-arch/agmm-render-public' || github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        workers: ${{ fromJSON(inputs.configs) }}
+    steps:
+      - name: Runtime
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP" &
+          F=$!
+          curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "$RUNNER_TEMP" &
+          N=$!
+          wait $F; wait $N
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/node-v22.12.0-linux-x64/bin" >> "$GITHUB_PATH"
+      - name: Film and openfilm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.film_run }}" -R "${{ github.repository }}" -n "film-${{ inputs.film_label }}" -D film
+          mkdir -p bench && cd bench && npm init -y >/dev/null && npm i --silent openfilm@0.2.5
+          nproc; free -g | head -2; google-chrome --version || true
+      - name: Render the span, sampling the CPU
+        run: |
+          set -euo pipefail
+          cat > bench/run.mjs <<'JS'
+          import { render } from './node_modules/openfilm/src/render.mjs';
+          const [dir, a, b, scale, workers, out] = process.argv.slice(2);
+          const t0 = Date.now();
+          const r = await render([dir, `${a}-${b}`], { scale: Number(scale), workers: Number(workers), out, silent: true,
+            format: { video: ['-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '0', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv'], pix: 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p' } });
+          console.log(r.lines.join('\n'));
+          console.log('wall_seconds', ((Date.now() - t0) / 1000).toFixed(1));
+          JS
+          read S < <(python3 -c "
+          import json; tl=json.load(open('film/assets/timeline.json')); A=tl['a']; W=tl['world_at']
+          s='${{ inputs.start_s }}'
+          print(round((float(A['ten'])+float(W))/2,2) if not s else s)")
+          N=${{ inputs.nframes }}
+          E=$(python3 -c "print(round($S + $N/30, 4))")
+          echo "span $S - $E, ${{ matrix.workers }} browsers, scale ${{ inputs.scale }}"
+          vmstat 5 > vm.log &
+          VM=$!
+          node bench/run.mjs film "$S" "$E" "${{ inputs.scale }}" "${{ matrix.workers }}" out.mp4 2>&1 | tee render.log | tail -8
+          kill $VM || true
+          # mean CPU use over the render (vmstat: us+sy of the total), skipping the first sample (since boot)
+          awk 'NR>3 {u+=$13; s+=$14; i+=$15; n++} END {printf "cpu user %.0f%% sys %.0f%% idle %.0f%% over %d samples\n", u/n, s/n, i/n, n}' vm.log | tee cpu.txt
+          ffmpeg -nostdin -v error -i out.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $1","$2","$6}' > frames.md5
+          wc -l frames.md5; head -3 frames.md5
+          ls -la out.mp4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: bench-${{ inputs.label }}-w${{ matrix.workers }}
+          path: |
+            render.log
+            cpu.txt
+            vm.log
+            frames.md5
+          retention-days: 3
