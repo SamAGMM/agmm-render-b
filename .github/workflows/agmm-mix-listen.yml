@@ -1,11 +1,11 @@
 name: AGMM mix listen
 run-name: AGMM mix listen ${{ inputs.label }}
-# A Gemini audio listener scores the whole final mix of a Hail Mary par run (27 Oct 2026). The mp4 comes from the run's own artifact; only numbers leave.
+# A Gemini audio listener scores a FINAL MIX (Hail Mary, 27 Oct 2026). The mix comes from an agmm-hailmary-par artifact (gate-input/mix.wav); only numbers and short notes leave.
 on:
   workflow_dispatch:
     inputs:
-      run_id: { description: agmm-hailmary-par run id on this repo, required: true }
-      artifact: { description: artifact name e.g. hailmary-H06-final19, required: true }
+      run_id: { description: agmm-hailmary-par run id (this repo), required: true }
+      artifact: { description: artifact name (hailmary-<label>), required: true }
       label: { description: short label, required: true }
 permissions:
   contents: read
@@ -19,32 +19,39 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-          sparse-checkout: |
-            .github/scripts/delivery
-      - name: Runtime (static ffmpeg, no apt)
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
-      - name: Fetch the mix
+      - name: Mix from the render artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.artifact }}" -D "$RUNNER_TEMP/art"
-          F=$(find "$RUNNER_TEMP/art" -name SHARE.mp4 | head -1); [ -n "$F" ] || F=$(find "$RUNNER_TEMP/art" -name '*.mp4' | head -1); echo "mix file: $F"; echo "MIX=$F" >> "$GITHUB_ENV"
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.artifact }}" -D art --pattern '*' || gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.artifact }}" -D art
+          ls art art/gate-input | head -30
       - name: Listen
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
         run: |
           set -euo pipefail
           mkdir -p out
-          python3 .github/scripts/delivery/mix_listen.py "$MIX" out/mix-listen.json 2>&1 | sed 's/AIza[A-Za-z0-9_-]*/***/g'
+          python3 - <<'PY' 2>&1 | sed 's/AIza[A-Za-z0-9_-]*/***/g'
+          import base64, json, os, time, urllib.request, urllib.error
+          src = "art/gate-input/mix.wav"
+          b64 = base64.b64encode(open(src, "rb").read()).decode()
+          prompt = ("You are a strict audio QA listener for a 40 second vertical social video. Part 1 (about the first 60 percent) is a gripping what-if story about paper receipts burying a street; at the turn the narrator says 'land right next to... A G M' and the music hands over to a bright playful theme for Part 2 (an AI consultancy pitch told by a cute robot). "
+                    "Listen to the WHOLE mix (voice, music, sound effects) and answer ONLY with JSON, no prose: "
+                    '{"first_half_music_suspenseful_curious": 1-10, "second_half_music_fun_upbeat": 1-10, "anything_cheap_out_of_tune_flat_or_robotic": ["short note with approximate second"], "hook_delivery_fast_curious_smooth": 1-10, "turn_sounds_excited_one_breath": 1-10, "voice_second_half_excited_fun": 1-10, "effects_clean_and_on_cue": 1-10, "mix_balance_voice_always_clear": 1-10, "noisy_or_out_of_place_sounds": ["note with second"], "overall_1_to_10": 1-10} '
+                    "Be critical: 8 means a professional would not change anything.")
+          body = {"generationConfig": {"temperature": 0.2, "maxOutputTokens": 3000, "responseMimeType": "application/json"}, "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "audio/wav", "data": b64}}]}]}
+          key = os.environ["GEMINI_API_KEY"]; res = None
+          for tr in range(10):
+              try:
+                  req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + key, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+                  r = json.load(urllib.request.urlopen(req, timeout=240)); res = json.loads(r["candidates"][0]["content"]["parts"][0]["text"]); break
+              except urllib.error.HTTPError as e:
+                  print("HTTP", e.code); time.sleep(30)
+              except Exception as e:
+                  print("ERR", str(e)[:120]); time.sleep(15)
+          json.dump(res or {"error": "no answer"}, open("out/listen.json", "w"), indent=1); print(json.dumps(res))
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
