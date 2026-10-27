@@ -78,7 +78,7 @@ jobs:
           json.dump(ts, open("gate-input/beats.json", "w"))
           print("beats at", ts)
           PY
-          ls -la gate-input gate-input/stems
+          ls -la gate-input
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
