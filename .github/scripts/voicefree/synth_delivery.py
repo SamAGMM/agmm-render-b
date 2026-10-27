@@ -39,6 +39,7 @@ def atempo(a, sr, f):
 def sanitize(m):
     """numbers only: drop every word and sentence text"""
     out = {k: v for k, v in m.items() if k not in ("words", "sentences", "gaps_ge_0p15", "numbers")}
+    out["overall"] = {k: v for k, v in m["overall"].items() if k != "text"}
     out["words"] = [{k: w.get(k) for k in ("i", "s", "e", "f0", "st", "stmax", "rel_db", "dbpk")} for w in m["words"]]
     out["sentences"] = [{k: v for k, v in s.items() if k not in ("text", "emphasis")} | {"emphasis_idx": [[sc, i] for sc, i, _w in s.get("emphasis", [])]} for s in m["sentences"]]
     out["gaps_ge_0p15"] = [{"t": g["t"], "gap": g["gap"]} for g in m["gaps_ge_0p15"]]
