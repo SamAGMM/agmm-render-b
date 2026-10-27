@@ -33,7 +33,8 @@ def main():
         key, take = stem.split(".t")[0], int(stem.split(".t")[1])
         pub.update({"key": key, "take": take, "cls": {"P1": "hook", "P5": "turn", "P6": "ad", "P7": "cta"}.get(key, "story"), "dur_s": rc["wav_info"]["duration_s"], "wpm_native": rc.get("wpm"), "span_wpm": rc.get("span_wpm"),
                     "asr_match": rc.get("asr_match"), "native_ratio": rc.get("native_ratio"), "brand": {"agm": bool(BRAND_AGM.search(asr)), "agmm_letters": bool(BRAND_AGMM.search(asr))},
-                    "frags": rc.get("frags"), "variant_idx": rc.get("tts_variant"), "sim_ref": rc.get("speaker_sim"), "spot_fail": len(rc.get("spot_fail") or []), "n_script_words": len(rc["text"].split())})
+                    "frags": rc.get("frags"), "variant_idx": rc.get("tts_variant"), "sim_ref": rc.get("speaker_sim"), "spot_fail": len(rc.get("spot_fail") or []), "n_script_words": len(rc["text"].split()),
+                    "tail_heard": (" ".join((rc.get("asr_text") or "").split()[-4:]) + " | " + " ".join(((rc.get("asr_variants") or {}).get("small.en") or "").split()[-4:])) if key in ("P5", "P7") else None})
         json.dump(pub, open(os.path.join(out, stem + ".delivery.json"), "w"))
         print(stem, "ok", flush=True)
 
