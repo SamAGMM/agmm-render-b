@@ -17,6 +17,7 @@ on:
       voice2_label: { description: label of that run, required: false, default: '' }
       extra_voices: { description: 'more voicefree runs, later ones win per paragraph, space-separated run_id:label', required: false, default: '' }
       segments: { description: number of parallel picture segments (max 20), required: false, default: '20' }
+      join: { description: 'copy (default) = join the segments by stream copy: no second lossy encode (proved 27 Oct on a real 4K run: exact frame count, every seam frame equals the segment own frame, PSNR vs the lossless render +1.3 dB over the re-encode). encode = the old x264 slow crf 15 re-encode', required: false, default: copy }
       scale: { description: 'device scale factor passed to openfilm render --scale: 2 = 2160x3840 (pages stay 1080x1920 CSS px), 1 = 1080x1920', required: false, default: '2' }
       reuse_picture_run: { description: 'run id whose picture segments to reuse (timeline AND scale must be identical)', required: false, default: '' }
       cuts: { description: 'optional explicit segment cut frames, comma-separated, first 0 and last = total frames (keeps reused segments aligned when the film length changes)', required: false, default: '' }
@@ -214,7 +215,18 @@ jobs:
           set -euo pipefail
           ls -la segs
           for f in $(ls segs/seg_*.mp4 | sort -V); do echo "file '$PWD/$f'" ; done > list.txt
-          ffmpeg -nostdin -y -loglevel error -f concat -safe 0 -i list.txt -an -c:v libx264 -preset slow -crf 15 -profile:v high -level 5.2 -pix_fmt yuv420p -r 30 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv picture.mp4
+          join_encode() {
+            ffmpeg -nostdin -y -loglevel error -f concat -safe 0 -i list.txt -an -c:v libx264 -preset slow -crf 15 -profile:v high -level 5.2 -pix_fmt yuv420p -r 30 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv picture.mp4
+          }
+          join_picture() {
+            if [ "${{ inputs.join }}" = "encode" ]; then join_encode; return; fi
+            ffmpeg -nostdin -y -loglevel error -f concat -safe 0 -i list.txt -an -c:v copy -movflags +faststart picture.mp4
+            N_SEG=$(for f in $(ls segs/seg_*.mp4 | sort -V); do ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=nb_read_packets -of csv=p=0 "$f"; done | awk '{s+=$1} END {print s}')
+            N_OUT=$(ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=nb_read_packets -of csv=p=0 picture.mp4)
+            echo "copy join: $N_OUT frames from $N_SEG in the segments"
+            if [ "$N_SEG" != "$N_OUT" ] || [ -z "$N_OUT" ] || [ "$N_OUT" = 0 ]; then echo "copy join frame count mismatch: falling back to the re-encode"; join_encode; fi
+          }
+          join_picture
           cd film && python3 mix.py mix.json ../mix.wav && cd ..
           # master: a straight gain to -14 LUFS plus a peak limiter, twice. Two-pass loudnorm fell back to its dynamic mode
           # and flattened every hit to voice level (26 Oct), which is the 'monotone' Sam heard.
