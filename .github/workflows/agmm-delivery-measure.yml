@@ -1,0 +1,58 @@
+name: AGMM delivery measure
+run-name: AGMM delivery measure ${{ inputs.label }}
+# A Gemini audio listener scores chosen voice takes (27 Oct 2026). Pack comes from a voicefree run (encrypted artifact); only numbers leave.
+on:
+  workflow_dispatch:
+    inputs:
+      voice_run_id: { description: voicefree run id, required: true }
+      voice_label: { description: label of that run, required: true }
+      label: { description: short label, required: true }
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agmm-delivery-measure-${{ inputs.label }}
+  cancel-in-progress: false
+jobs:
+  measure:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/scripts/delivery
+      - name: Runtime (static ffmpeg, no apt)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+      - name: Voice pack (decrypt)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VOICEFREE_PASS: ${{ secrets.VOICEFREE_PASS }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.voice_run_id }}" -R "${{ github.repository }}" -n "voicefree-chatterbox-${{ inputs.voice_label }}-ENC" -D "$RUNNER_TEMP/vpack"
+          mkdir -p "$RUNNER_TEMP/voice"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice"
+      - name: Python deps
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          . "$RUNNER_TEMP/venv/bin/activate"
+          pip install --quiet --retries 4 numpy scipy soundfile praat-parselmouth
+      - name: Measure every take
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/venv/bin/activate"
+          python .github/scripts/delivery/delivery_pack_measure.py "$RUNNER_TEMP/voice" out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: measure-${{ inputs.label }}
+          path: out
+          retention-days: 7

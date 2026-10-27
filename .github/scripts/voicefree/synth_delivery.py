@@ -145,7 +145,7 @@ def main():
             json.dump(receipt, open(os.path.join(a.out, stem + ".receipt.json"), "w"), indent=2, ensure_ascii=False)
             # delivery measurement (numbers only go public)
             try:
-                words = [{"w": w["text"].strip(), "s": w["start"], "e": w["end"]} for w in resp["segments"] if w.get("type", "word") == "word"]
+                words = [{"w": w["text"].strip(), "s": w["start"], "e": w["end"]} for w in resp["segments"] if w.get("text")]
                 m = DM.measure(wav_path, words=words, name=stem)
                 pub = sanitize(m)
             except Exception as e:      # noqa: BLE001
