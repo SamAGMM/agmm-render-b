@@ -42,7 +42,9 @@ jobs:
           set -euo pipefail
           gh run download "${{ inputs.film_run }}" -R "${{ github.repository }}" -n "film-${{ inputs.film_label }}" -D film
           mkdir -p bench && cd bench && npm init -y >/dev/null && npm i --silent openfilm@0.2.5
-          nproc; free -g | head -2; google-chrome --version || true
+          nproc; free -g | head -2
+          # what the first openfilm run does by itself in every segment job: fetch Playwright's headless Chromium (timed here)
+          ( time node node_modules/playwright-core/cli.js install chromium-headless-shell ) 2>&1 | tail -5
       - name: Render the span, sampling the CPU
         run: |
           set -euo pipefail
