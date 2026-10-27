@@ -30,7 +30,7 @@ concurrency:
 jobs:
   build:
     if: github.repository == 'SamAGMM/agmm-render-b'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     outputs:
       total: ${{ steps.b.outputs.total }}
@@ -73,6 +73,8 @@ jobs:
             mkdir -p "$RUNNER_TEMP/voice2"
             openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack2/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice2"
           fi
+      - name: Python packages the film builders use (ubuntu-22.04 images have no numpy, and its pip has no --break-system-packages)
+        run: python3 -m pip install --quiet --retries 4 numpy scipy pillow
       - id: b
         name: Build the edit and the mix plan on the voice
         run: |
@@ -189,7 +191,7 @@ jobs:
           if-no-files-found: ignore
   assemble:
     needs: [build, picture]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
