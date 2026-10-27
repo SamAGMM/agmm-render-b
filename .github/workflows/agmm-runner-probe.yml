@@ -1,0 +1,21 @@
+name: AGMM runner probe
+run-name: AGMM runner probe ${{ inputs.label }}
+on:
+  workflow_dispatch:
+    inputs:
+      label: { description: short label, required: true }
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.repository == 'agmmltd-arch/agmm-render-public' || github.repository == 'SamAGMM/agmm-render-b'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-22.04, ubuntu-22.04-arm, macos-14, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - run: |
+          uname -srm; (nproc || sysctl -n hw.ncpu); (free -g 2>/dev/null | sed -n 2p || sysctl -n hw.memsize)
+          date -u +%T
