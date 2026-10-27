@@ -1,0 +1,87 @@
+name: AGMM hailmary post master
+run-name: AGMM hailmary post ${{ inputs.label }}
+# Hail Mary packager, post-only (27 Oct 2026): from a finished par run's artifact hailmary-<label> make the 1080x1920 crf 17 post master (the file the V2 gate
+# checks and the autoposter posts), its Whisper evidence and the 16-frame beats sheet. No stems (those need the film folder: use the par workflow's packager step).
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: 'par run id holding the artifact hailmary-<label>', required: true }
+      label: { description: 'the par run label (artifact is hailmary-<label>)', required: true }
+permissions:
+  contents: read
+  actions: read
+jobs:
+  post:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Runtime
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --quiet --retries 4 pillow
+      - name: Fetch the par artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "hailmary-${{ inputs.label }}" -D art
+          mkdir -p gate-input film/assets
+          cp art/FINAL.mp4 FINAL.mp4; cp art/qa/timeline.json film/assets/timeline.json
+          ls -la art
+      - name: Post master, Whisper evidence, beats sheet
+        run: |
+          set -euo pipefail
+          trap 'echo "post step failed at line $LINENO" > gate-input/STEP_FAILED.txt' ERR
+          # 1. the 1080x1920 post master (crf 17). FINAL.mp4 stays the 4K; its audio stream is copied bit for bit.
+          ffmpeg -nostdin -y -loglevel error -i FINAL.mp4 -vf scale=1080:1920:flags=lanczos -c:v libx264 -preset slow -crf 17 -maxrate 16M -bufsize 32M -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -c:a copy -movflags +faststart gate-input/POST1080.mp4
+          ffmpeg -nostdin -y -loglevel error -i gate-input/POST1080.mp4 -vn -ar 48000 -c:a pcm_s16le gate-input/mix.wav
+          sha256sum gate-input/POST1080.mp4 | cut -d' ' -f1 > gate-input/POST1080.sha256
+          python3 -m pip install --quiet --retries 4 faster-whisper soundfile numpy
+          python3 - <<'PY'
+          import hashlib, json, subprocess
+          import numpy as np
+          from faster_whisper import WhisperModel
+          m = WhisperModel("small.en", device="cpu", compute_type="int8")
+          def text(path):      # decode with ffmpeg ourselves: the runner's preinstalled PyAV is too old for faster-whisper's own decoder
+              raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+              segs, _ = m.transcribe(np.frombuffer(raw, dtype=np.float32), language="en", beam_size=5, vad_filter=False, condition_on_previous_text=False)
+              return " ".join(s.text.strip() for s in segs)
+          h = hashlib.sha256(open("gate-input/POST1080.mp4", "rb").read()).hexdigest()
+          json.dump({"video_sha256": h, "model": "faster-whisper small.en int8", "text": text("gate-input/POST1080.mp4"),
+                     "voice_only_text": ""}, open("gate-input/whisper.json", "w"), indent=1)
+          print(open("gate-input/whisper.json").read()[:600])
+          PY
+          # 4. the beats contact sheet: 16 frames at the film's own anchor times, each labelled with its second
+          python3 - <<'PY'
+          import json, subprocess
+          from PIL import Image, ImageDraw
+          tl = json.load(open("film/assets/timeline.json")); T = tl["total"]
+          ts = sorted({round(v, 2) for v in tl.get("a", {}).values() if 0.2 < v < T - 0.3})
+          while len(ts) > 14:                      # thin the closest pair until 14 anchors remain
+              i = min(range(1, len(ts)), key=lambda k: ts[k] - ts[k - 1])
+              ts.pop(i)
+          ts = sorted(set(ts + [0.3, round(T - 0.4, 2)]))
+          for u in [i * T / 16 for i in range(1, 16)]:
+              if len(ts) >= 16:
+                  break
+              ts.append(round(u, 2))
+          ts = sorted(set(ts))[:16]
+          W, H = 270, 480
+          sheet = Image.new("RGB", (W * 4, H * 4), "black")
+          for i, t in enumerate(ts):
+              subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-ss", str(t), "-i", "gate-input/POST1080.mp4", "-frames:v", "1", "-vf", "scale=270:480", "f.png"], check=True)
+              im = Image.open("f.png").convert("RGB"); d = ImageDraw.Draw(im); d.rectangle([0, 0, 62, 16], fill="black"); d.text((3, 2), "%.1fs" % t, fill="white")
+              sheet.paste(im, ((i % 4) * W, (i // 4) * H))
+          sheet.save("gate-input/beats.jpg", quality=88)
+          json.dump(ts, open("gate-input/beats.json", "w"))
+          print("beats at", ts)
+          PY
+          ls -la gate-input gate-input/stems
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: post-${{ inputs.label }}
+          path: gate-input
+          retention-days: 7
