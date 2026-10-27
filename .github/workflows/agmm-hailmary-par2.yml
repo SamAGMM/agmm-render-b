@@ -1,4 +1,5 @@
 name: AGMM hailmary parallel 2
+# par2 = par.yml (which now also runs on ubuntu-22.04 with --workers 2) + a reuse fix (empty segments never wait for an artifact) + an assemble that overlaps its independent work (FINAL.mp4 byte-identical; measured gain is small, the assemble is CPU-bound). Same input names.
 run-name: AGMM hailmary par2 ${{ inputs.label }}
 # Hail Mary shorts, fast path (26 Oct 2026): build once, render the picture in up to 20 parallel segments at device scale 2 (2160x3840 from pages authored at 1080x1920 CSS px), split by measured cost per frame (the clone crowd is the slow part) (OpenFilm, headless Chromium),
 # join them, mix the sound with the project's own mix.py (designed arc: build-up, riser, hit, ducking), master to -14 LUFS, run qa.py.
@@ -77,6 +78,8 @@ jobs:
             mkdir -p "$RUNNER_TEMP/voice2"
             openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack2/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice2"
           fi
+      - name: Python packages the film builders use (ubuntu-22.04 images have no numpy, and its pip has no --break-system-packages)
+        run: python3 -m pip install --quiet --retries 4 numpy scipy pillow
       - id: b
         name: Build the edit and the mix plan on the voice
         run: |
