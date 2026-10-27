@@ -17,6 +17,9 @@ on:
       voice2_label: { description: label of that run, required: false, default: '' }
       extra_voices: { description: 'more voicefree runs, later ones win per paragraph, space-separated run_id:label', required: false, default: '' }
       segments: { description: number of parallel picture segments (max 20), required: false, default: '20' }
+      runner: { description: 'runs-on label for the picture segment jobs. ubuntu-24.04 starves when GitHub is short of runners; ubuntu-22.04 is the same x64 hardware and Chromium and was picked up in about 70 s', required: false, default: ubuntu-22.04 }
+      runner_misc: { description: 'runs-on label for the build and assemble jobs', required: false, default: ubuntu-22.04 }
+      workers: { description: 'browsers per segment job (4 vCPU). 2 is the fastest measured: 1.4 to 1.8x over openfilm default (1 for short segments, 3 for long ones); frames identical for any count', required: false, default: '2' }
       scale: { description: 'device scale factor passed to openfilm render --scale: 2 = 2160x3840 (pages stay 1080x1920 CSS px), 1 = 1080x1920', required: false, default: '2' }
       reuse_picture_run: { description: 'run id whose picture segments to reuse (timeline AND scale must be identical)', required: false, default: '' }
       cuts: { description: 'optional explicit segment cut frames, comma-separated, first 0 and last = total frames (keeps reused segments aligned when the film length changes)', required: false, default: '' }
@@ -31,7 +34,7 @@ concurrency:
 jobs:
   build:
     if: github.repository == 'agmmltd-arch/agmm-render-public' || github.repository == 'SamAGMM/agmm-render-b'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner_misc }}
     timeout-minutes: 30
     outputs:
       total: ${{ steps.b.outputs.total }}
@@ -92,7 +95,7 @@ jobs:
           include-hidden-files: true
   picture:
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -142,6 +145,8 @@ jobs:
             U="${{ inputs.rerender_until }}"
             if [ -n "$U" ] && python3 -c "import sys; sys.exit(0 if float('$A') < float('$U') else 1)"; then R=no; fi
           fi
+          # an empty range (segment index past the cut list) has nothing to reuse and nothing to render: never wait for its artifact
+          python3 -c "import sys; sys.exit(0 if float('$A') >= float('$B') else 1)" && R=no
           echo "reuse=$R" >> "$GITHUB_OUTPUT"; echo "segment ${{ matrix.seg }}: $A - $B reuse=$R"
       - name: Reuse this segment from the earlier run
         if: steps.rng.outputs.reuse == 'yes'
@@ -182,7 +187,7 @@ jobs:
             # page loads can flake at 2x (an aborted asset fetch, "window.film did not appear"): retry up to 3 times
             ok=0
             for try in 1 2 3; do
-              if timeout 3000 npx -y openfilm@0.2.5 render "$A-$B" --scale "${{ inputs.scale }}" --out "../seg_${{ matrix.seg }}.mp4" > render.log 2>&1; then ok=1; break; fi
+              if timeout 3000 npx -y openfilm@0.2.5 render "$A-$B" --scale "${{ inputs.scale }}" --workers "${{ inputs.workers }}" --out "../seg_${{ matrix.seg }}.mp4" > render.log 2>&1; then ok=1; break; fi
               echo "attempt $try failed:"; tail -5 render.log; sleep 8
             done
             tail -6 render.log
@@ -197,7 +202,7 @@ jobs:
           if-no-files-found: ignore
   assemble:
     needs: [build, picture]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner_misc }}
     timeout-minutes: 60
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
