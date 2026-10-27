@@ -20,10 +20,10 @@ for t in takes:
     wav = os.path.join(pack, t + ".wav"); mp3 = "/tmp/%s.mp3" % t
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", wav, "-ac", "1", "-b:a", "96k", mp3], check=True)
     b64 = base64.b64encode(open(mp3, "rb").read()).decode()
-    body = {"generationConfig": {"temperature": 0.2, "maxOutputTokens": 600, "responseMimeType": "application/json"},
+    body = {"generationConfig": {"temperature": 0.2, "maxOutputTokens": 4000, "responseMimeType": "application/json"},
             "contents": [{"parts": [{"text": Q[cls]}, {"inline_data": {"mime_type": "audio/mp3", "data": b64}}]}]}
     r = None
-    for k in range(6):
+    for k in range(4):
         try:
             req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % MODEL, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": KEY})
             j = json.load(urllib.request.urlopen(req, timeout=180))
@@ -32,7 +32,7 @@ for t in takes:
         except Exception as e:      # noqa: BLE001
             msg = repr(e)[:120]
             print(t, "retry", k, msg.replace(KEY, "***"), flush=True)
-            time.sleep(15 * (k + 1))
+            time.sleep(6 * (k + 1))
     res[t] = {"cls": cls, "scores": r}
     print(t, cls, json.dumps(r), flush=True)
     time.sleep(4)
