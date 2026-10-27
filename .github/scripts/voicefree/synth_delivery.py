@@ -36,6 +36,17 @@ def atempo(a, sr, f):
     return y
 
 
+def _recall(script, a, b):
+    """numbers only: share of script words found in the ASR text (best of the two transcribers), and whether the first/last three script words are all there"""
+    import re as _re
+    norm = lambda t: _re.findall(r"[a-z0-9']+", t.lower().replace("&", " and "))
+    sw = norm(script); out = {}
+    for name, t in (("medium", a), ("small", b)):
+        hw = norm(t); hs = set(hw)
+        out[name] = {"recall": round(sum(1 for w in sw if w in hs) / max(1, len(sw)), 3), "first3": all(w in hs for w in sw[:3]), "last3": all(w in hs for w in sw[-3:]), "heard_words": len(hw)}
+    return out
+
+
 def sanitize(m):
     """numbers only: drop every word and sentence text"""
     out = {k: v for k, v in m.items() if k not in ("words", "sentences", "gaps_ge_0p15", "numbers")}
@@ -157,7 +168,7 @@ def main():
                 print("measure failed", stem, repr(e)[:200], flush=True); pub = {"error": repr(e)[:200]}
             pub.update({"key": key, "take": takei, "cls": para.get("cls"), "dur_s": info["duration_s"], "wpm_native": wpm_native, "span_wpm": swpm, "asr_match": bool(ok), "native_ratio": nat_ratio,
                         "brand": brand, "frags": frag_times, "variant_idx": (takei - 1) % len(vars_), "sim_ref": sims, "spot_fail": len(sp_bad), "render_s": render_s,
-                        "n_script_words": len(text.split())})
+                        "n_script_words": len(text.split()), "recall": _recall(text, resp["text"], resp_s["text"])})
             json.dump(pub, open(os.path.join(a.pub, stem + ".delivery.json"), "w"))
             row = {"key": key, "take": takei, "dur_s": info["duration_s"], "wpm_native": wpm_native, "span_wpm": swpm, "asr_match": bool(ok), "render_s": render_s, "sim_ref": sims, "chunks": len(var["frags"]),
                    "native_ratio": nat_ratio, "sim_baseline": None}
