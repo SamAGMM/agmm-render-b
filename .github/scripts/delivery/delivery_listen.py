@@ -16,6 +16,9 @@ Q = {
  "story": BASE + 'This is a STORY line in the first half: curious, engaging, brisk, escalating, not monotone. Keys: "curious_engaging", "brisk", "flat_robotic" (10 = very flat or robotic), "overall".',
 }
 res = {}
+MODELS = [m for m in os.environ.get("GEMINI_MODELS", "gemini-3-flash-preview,gemini-2.5-flash,gemini-2.5-flash-lite").split(",") if m]
+combos = [(k, m) for m in MODELS for k in KEYS]
+dead = set()
 for t in takes:
     key = t.split(".")[0]; cls = CLS.get(key, "story")
     wav = os.path.join(pack, t + ".wav"); mp3 = "/tmp/%s.mp3" % t
@@ -23,18 +26,23 @@ for t in takes:
     b64 = base64.b64encode(open(mp3, "rb").read()).decode()
     body = {"generationConfig": {"temperature": 0.2, "maxOutputTokens": 4000, "responseMimeType": "application/json"},
             "contents": [{"parts": [{"text": Q[cls]}, {"inline_data": {"mime_type": "audio/mp3", "data": b64}}]}]}
-    r = None
-    for k in range(len(KEYS) * 2 + 1):
-        try:
-            req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % MODEL, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": KEYS[KI[0] % len(KEYS)]})
-            j = json.load(urllib.request.urlopen(req, timeout=180))
-            txt = "".join(p.get("text", "") for p in j["candidates"][0]["content"]["parts"] if "text" in p)
-            r = json.loads(txt[txt.find("{"):txt.rfind("}") + 1]); break
-        except Exception as e:      # noqa: BLE001
-            msg = repr(e)[:120]
-            print(t, "retry", k, "key", KI[0] % len(KEYS), msg[:60], flush=True)
-            KI[0] += 1; time.sleep(5)
-    res[t] = {"cls": cls, "scores": r}
-    print(t, cls, json.dumps(r), flush=True)
-    time.sleep(4)
+    r, used = None, None
+    for rnd in range(3):
+        for (k, m) in combos:
+            if (k, m) in dead: continue
+            try:
+                req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": k})
+                j = json.load(urllib.request.urlopen(req, timeout=180))
+                txt = "".join(p.get("text", "") for p in j["candidates"][0]["content"]["parts"] if "text" in p)
+                r = json.loads(txt[txt.find("{"):txt.rfind("}") + 1]); used = m; break
+            except urllib.error.HTTPError as e:
+                if e.code in (400, 403, 404): dead.add((k, m))
+                print(t, "http", e.code, m, KEYS.index(k), flush=True)
+            except Exception as e:      # noqa: BLE001
+                print(t, "err", repr(e)[:60], m, flush=True)
+        if r: break
+        time.sleep(20)
+    res[t] = {"cls": cls, "scores": r, "model": used}
+    print(t, cls, used, json.dumps(r), flush=True)
+    time.sleep(2)
 json.dump(res, open(out, "w"), indent=1)
