@@ -7,18 +7,23 @@ on:
     inputs:
       film_run: { description: 'run id holding the artifact film-<film_label> (this repo)', required: true }
       film_label: { description: label of that run, required: true }
+      film_repo: { description: 'repo holding that run (owner/name); empty = this repo. Public repo artifacts are readable cross-repo', required: false, default: '' }
       label: { description: short label, required: true }
       nframes: { description: frames in the span, required: false, default: '12' }
       start_s: { description: 'span start in seconds (empty = middle of the crowd stretch)', required: false, default: '' }
       scale: { description: device scale, required: false, default: '2' }
       configs: { description: 'JSON list of worker counts', required: false, default: '[1,2,3,4]' }
+      runner: { description: 'runs-on label (ubuntu-24.04, ubuntu-24.04-arm)', required: false, default: ubuntu-24.04 }
+      keep_video: { description: 'yes = upload the lossless span (1 day) so another runner type can be compared to it', required: false, default: 'no' }
+      ref_run: { description: 'run id of an earlier bench that kept its video (same repo); this run then reports PSNR against it', required: false, default: '' }
+      ref_label: { description: label of that run, required: false, default: '' }
 permissions:
   contents: read
   actions: read
 jobs:
   bench:
     if: github.repository == 'agmmltd-arch/agmm-render-public' || github.repository == 'SamAGMM/agmm-render-b'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -28,19 +33,24 @@ jobs:
       - name: Runtime
         run: |
           set -euo pipefail
-          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP" &
+          case "$(uname -m)" in
+            x86_64) FF=linux64; ND=x64 ;;
+            aarch64) FF=linuxarm64; ND=arm64 ;;
+          esac
+          uname -srm
+          curl -fsSL --retry 4 "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-$FF-gpl.tar.xz" | tar -xJ -C "$RUNNER_TEMP" &
           F=$!
-          curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "$RUNNER_TEMP" &
+          curl -fsSL --retry 4 "https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-$ND.tar.xz" | tar -xJ -C "$RUNNER_TEMP" &
           N=$!
           wait $F; wait $N
-          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
-          echo "$RUNNER_TEMP/node-v22.12.0-linux-x64/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-$FF-gpl/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/node-v22.12.0-linux-$ND/bin" >> "$GITHUB_PATH"
       - name: Film and openfilm
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh run download "${{ inputs.film_run }}" -R "${{ github.repository }}" -n "film-${{ inputs.film_label }}" -D film
+          gh run download "${{ inputs.film_run }}" -R "${{ inputs.film_repo || github.repository }}" -n "film-${{ inputs.film_label }}" -D film
           mkdir -p bench && cd bench && npm init -y >/dev/null && npm i --silent openfilm@0.2.5
           nproc; free -g | head -2
           # what the first openfilm run does by itself in every segment job: fetch Playwright's headless Chromium (timed here)
@@ -73,6 +83,26 @@ jobs:
           ffmpeg -nostdin -v error -i out.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $1","$2","$6}' > frames.md5
           wc -l frames.md5; head -3 frames.md5
           ls -la out.mp4
+          mv out.mp4 lossless.mp4
+      - name: Compare with the reference run (same pixels?)
+        if: inputs.ref_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.ref_run }}" -R "${{ github.repository }}" -n "bench-${{ inputs.ref_label }}-w${{ matrix.workers }}-video" -D ref
+          ls -la ref
+          # lossless on both sides, so this is the renderer alone
+          ffmpeg -nostdin -v error -i lossless.mp4 -i ref/lossless.mp4 -lavfi "[0:v][1:v]psnr=stats_file=psnr.log" -f null - 2>&1 | tail -3 || true
+          echo "psnr summary (100 = identical):"
+          awk '{split($6,a,":"); v=a[2]; if(v=="inf") v=100; if(min==""||v<min)min=v; s+=v; n++} END {printf "frames %d  min %.2f  mean %.2f\n", n, min, s/n}' psnr.log | tee psnr.txt
+          ffmpeg -nostdin -v error -i lossless.mp4 -i ref/lossless.mp4 -lavfi "[0:v][1:v]blend=all_mode=difference,format=gray,signalstats,metadata=print:key=lavfi.signalstats.YMAX:file=-" -f null - | grep YMAX | awk -F= '{if($2>m)m=$2} END {print "max abs luma difference over all frames:", m}' | tee -a psnr.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: inputs.keep_video == 'yes'
+        with:
+          name: bench-${{ inputs.label }}-w${{ matrix.workers }}-video
+          path: lossless.mp4
+          retention-days: 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -82,4 +112,6 @@ jobs:
             cpu.txt
             vm.log
             frames.md5
+            psnr.txt
+            psnr.log
           retention-days: 3
