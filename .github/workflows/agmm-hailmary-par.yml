@@ -177,7 +177,7 @@ jobs:
             # page loads can flake at 2x (an aborted asset fetch, "window.film did not appear"): retry up to 3 times
             ok=0
             for try in 1 2 3; do
-              if timeout 3000 npx -y openfilm@0.2.5 render "$A-$B" --scale "${{ inputs.scale }}" --workers 2 --out "../seg_${{ matrix.seg }}.mp4" > render.log 2>&1; then ok=1; break; fi
+              if timeout 3000 npx -y openfilm@0.2.5 render "$A-$B" --scale "${{ inputs.scale }}" --out "../seg_${{ matrix.seg }}.mp4" > render.log 2>&1; then ok=1; break; fi
               echo "attempt $try failed:"; tail -5 render.log; sleep 8
             done
             tail -6 render.log
