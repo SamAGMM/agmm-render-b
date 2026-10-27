@@ -1,0 +1,53 @@
+name: AGMM mix listen
+run-name: AGMM mix listen ${{ inputs.label }}
+# A Gemini audio listener scores the whole final mix of a Hail Mary par run (27 Oct 2026). The mp4 comes from the run's own artifact; only numbers leave.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: agmm-hailmary-par run id on this repo, required: true }
+      artifact: { description: artifact name e.g. hailmary-H06-final19, required: true }
+      label: { description: short label, required: true }
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agmm-mix-listen-${{ inputs.label }}
+  cancel-in-progress: false
+jobs:
+  listen:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/scripts/delivery
+      - name: Runtime (static ffmpeg, no apt)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+      - name: Fetch the mix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.artifact }}" -D "$RUNNER_TEMP/art"
+          F=$(find "$RUNNER_TEMP/art" -name SHARE.mp4 | head -1); [ -n "$F" ] || F=$(find "$RUNNER_TEMP/art" -name '*.mp4' | head -1); echo "mix file: $F"; echo "MIX=$F" >> "$GITHUB_ENV"
+      - name: Listen
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 .github/scripts/delivery/mix_listen.py "$MIX" out/mix-listen.json 2>&1 | sed 's/AIza[A-Za-z0-9_-]*/***/g'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: mixlisten-${{ inputs.label }}
+          path: out
+          retention-days: 7
