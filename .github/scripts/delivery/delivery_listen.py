@@ -2,7 +2,8 @@
 """delivery_listen.py PACKDIR "P1.t2 P1.t4 ..." OUT.json : a Gemini audio listener scores chosen takes. Numbers only leave the runner (no script text in the output)."""
 import base64, json, os, subprocess, sys, time, urllib.request, urllib.error
 pack, takes, out = sys.argv[1], sys.argv[2].split(), sys.argv[3]
-KEY = os.environ["GEMINI_API_KEY"]
+KEYS = [k for k in (os.environ.get("GEMINI_API_KEYS", "") + "," + os.environ.get("GEMINI_API_KEY", "")).split(",") if k.strip()]
+KI = [0]
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 CLS = {"P1": "hook", "P5": "turn", "P6": "ad", "P7": "cta"}
 BASE = ("You are a strict voice director listening to ONE line of a 35-second British social video ad narration (cloned human voice, text to speech). Score honestly on 1-10 "
@@ -23,16 +24,16 @@ for t in takes:
     body = {"generationConfig": {"temperature": 0.2, "maxOutputTokens": 4000, "responseMimeType": "application/json"},
             "contents": [{"parts": [{"text": Q[cls]}, {"inline_data": {"mime_type": "audio/mp3", "data": b64}}]}]}
     r = None
-    for k in range(4):
+    for k in range(len(KEYS) * 2 + 1):
         try:
-            req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % MODEL, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": KEY})
+            req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % MODEL, json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": KEYS[KI[0] % len(KEYS)]})
             j = json.load(urllib.request.urlopen(req, timeout=180))
             txt = "".join(p.get("text", "") for p in j["candidates"][0]["content"]["parts"] if "text" in p)
             r = json.loads(txt[txt.find("{"):txt.rfind("}") + 1]); break
         except Exception as e:      # noqa: BLE001
             msg = repr(e)[:120]
-            print(t, "retry", k, msg.replace(KEY, "***"), flush=True)
-            time.sleep(6 * (k + 1))
+            print(t, "retry", k, "key", KI[0] % len(KEYS), msg[:60], flush=True)
+            KI[0] += 1; time.sleep(5)
     res[t] = {"cls": cls, "scores": r}
     print(t, cls, json.dumps(r), flush=True)
     time.sleep(4)
