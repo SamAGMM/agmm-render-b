@@ -1,0 +1,48 @@
+name: AGMM delivery assemble
+run-name: AGMM delivery assemble ${{ inputs.out_label }}
+# Build one voicefree pack from chosen takes of several packs (27 Oct 2026). The artifact has the SAME name/shape as voicefree-chatterbox-<label>-ENC so agmm-hailmary-par can use it as voice_run_id.
+on:
+  workflow_dispatch:
+    inputs:
+      spec_b64: { description: 'base64 of the JSON spec [{run,label,key,take,as}]', required: true }
+      out_label: { description: label of the assembled pack, required: true }
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agmm-delivery-assemble-${{ inputs.out_label }}
+  cancel-in-progress: false
+jobs:
+  assemble:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/scripts/voicefree
+            .github/scripts/delivery
+      - name: Assemble and encrypt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VOICEFREE_PASS: ${{ secrets.VOICEFREE_PASS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/work" "$RUNNER_TEMP/out"
+          echo "${{ inputs.spec_b64 }}" | base64 -d > "$RUNNER_TEMP/spec.json"
+          python3 .github/scripts/delivery/assemble_pack.py "$RUNNER_TEMP/spec.json" "$RUNNER_TEMP/out" "$RUNNER_TEMP/work"
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, ".github/scripts/voicefree")
+          import vf_common as C
+          print("encrypted bytes", C.pack_encrypt(os.environ["RUNNER_TEMP"] + "/out", os.environ["RUNNER_TEMP"] + "/synth-pack.enc"))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: voicefree-chatterbox-${{ inputs.out_label }}-ENC
+          path: ${{ runner.temp }}/synth-pack.enc
+          retention-days: 7
+          if-no-files-found: error
