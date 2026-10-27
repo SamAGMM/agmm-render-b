@@ -104,7 +104,22 @@ def normalise_lufs(a, sr, target=-18.0):
 NATIVE_FILMS = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "voice-native", "films", "voice", "tooling"))
 
 
-def native_ratio(text, heard):
+def fold_equal(text, heard, names=None):
+    """Delta 7: True when the script and the transcript are the SAME word sequence after the whole-file check's own folds (asr_fold.fold_pair: UK/US spelling, name possessives and
+    phonetic name aliases, pound amounts, ordinals 16th == sixteenth, spoken years). Zero diffs only, so this is never looser than the whole-file rule; numbers must be equal, not within 2%.
+    asr_compare.compare is strict about token COUNT, so "16th" (read as 16 + th) failed take after take (S256 P02, 26 Oct) although the audio was right."""
+    if NATIVE_FILMS not in sys.path:
+        sys.path.insert(0, NATIVE_FILMS)
+    try:
+        from asr_fold import fold_pair
+        from post_checks_local import fold, _canon
+    except ImportError:
+        return False
+    a, b, _ = fold_pair(fold(text), fold(heard), "\n".join(names or []), _canon)
+    return bool(a) and [str(t) for t in a] == [str(t) for t in b]
+
+
+def native_ratio(text, heard, names=None):
     """The hosted chain's own whole-file ASR rule (films/voice/tooling/post_checks_local.py): local small.en, no prompt, folded script-vs-heard word diff, ratio >= 0.97 or the
     short fails (S255, S268 20-26 Oct: names such as Dunelm, Royal Mail). Applied here per paragraph so a take that would fail that rule is re-rolled before it is sealed.
     Returns (ratio, first diffs)."""
@@ -112,8 +127,13 @@ def native_ratio(text, heard):
     if NATIVE_FILMS not in sys.path:
         sys.path.insert(0, NATIVE_FILMS)
     from post_checks_local import fold, _canon
-    a = [str(t) for t in _canon(fold(text))]
-    b = [str(t) for t in _canon(fold(heard))]
+    try:        # delta 7: the same folds the hosted check applies (asr_fold), so a per-take ratio predicts the whole-file ratio
+        from asr_fold import fold_pair
+        ta, tb, _ = fold_pair(fold(text), fold(heard), "\n".join(names or []), _canon)
+        a, b = [str(t) for t in ta], [str(t) for t in tb]
+    except ImportError:
+        a = [str(t) for t in _canon(fold(text))]
+        b = [str(t) for t in _canon(fold(heard))]
     sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
     diffs = [{"script": " ".join(a[i1:i2]), "heard": " ".join(b[j1:j2])} for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
     return round(sm.ratio(), 4), diffs[:8]
@@ -316,11 +336,12 @@ def main():
                     tempo = (tempo or 1.0) * t2
             ok_m, detail = compare(text, resp["text"])
             ok_s, detail_s = compare(text, resp_s["text"])
-            sm = "" if (ok_m or ok_s) else (soft_match(text, resp["text"]) or soft_match(text, resp_s["text"]))
+            sm = "" if (ok_m or ok_s) else (soft_match(text, resp["text"]) or soft_match(text, resp_s["text"])
+                                            or ("fold-equal: identical after the whole-file folds" if (fold_equal(text, resp["text"], names) or fold_equal(text, resp_s["text"], names)) else ""))
             rides = gain_ride(wav_path, resp["segments"])
             if rides:
                 info = C.wav_info(wav_path)
-            nat_ratio, nat_diffs = native_ratio(text, resp_s["text"])
+            nat_ratio, nat_diffs = native_ratio(text, resp_s["text"], names)
             sp_bad = spot_fail(wav_path, resp["segments"])
             ok = bool(ok_m or ok_s or sm) and not sp_bad          # a silent word window fails the take exactly as the native chain would
             if not ok_m and ok_s:
