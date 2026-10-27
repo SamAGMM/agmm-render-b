@@ -8,6 +8,21 @@ BRAND_AGM = re.compile(r"(?<![a-z0-9])a[\s.\-,]*g[\s.\-,]*m(?![a-z0-9])(?![\s.\-
 BRAND_AGMM = re.compile(r"(?<![a-z0-9])a[\s.\-,]*g[\s.\-,]*m[\s.\-,]*m(?![a-z0-9])", re.I)
 
 
+CLS = {"P1": "hook", "P5": "turn", "P6": "ad", "P7": "cta"}
+for _kv in (os.environ.get("CLS_MAP") or "").split(","):
+    if "=" in _kv:
+        _k, _v = _kv.split("="); CLS[_k.strip()] = _v.strip()
+
+
+def _recall(script, a, b):
+    norm = lambda t: re.findall(r"[a-z0-9']+", t.lower())
+    sw = norm(script); out = {}
+    for name, t in (("medium", a), ("small", b)):
+        hw = norm(t); hs = set(hw)
+        out[name] = {"recall": round(sum(1 for w in sw if w in hs) / max(1, len(sw)), 3), "first3": all(w in hs for w in sw[:3]), "last3": all(w in hs for w in sw[-3:])}
+    return out
+
+
 def sanitize(m):
     out = {k: v for k, v in m.items() if k not in ("words", "sentences", "gaps_ge_0p15", "numbers", "overall", "sections", "turn_tail", "name")}
     out["overall"] = {k: v for k, v in m["overall"].items() if k != "text"}
@@ -31,10 +46,10 @@ def main():
             print("measure failed", stem, repr(e)[:200]); pub = {"error": repr(e)[:200]}
         asr = (rc.get("asr_text") or "") + " || " + ((rc.get("asr_variants") or {}).get("small.en") or "")
         key, take = stem.split(".t")[0], int(stem.split(".t")[1])
-        pub.update({"key": key, "take": take, "cls": {"P1": "hook", "P5": "turn", "P6": "ad", "P7": "cta"}.get(key, "story"), "dur_s": rc["wav_info"]["duration_s"], "wpm_native": rc.get("wpm"), "span_wpm": rc.get("span_wpm"),
+        pub.update({"key": key, "take": take, "cls": CLS.get(key, "story"), "dur_s": rc["wav_info"]["duration_s"], "wpm_native": rc.get("wpm"), "span_wpm": rc.get("span_wpm"),
                     "asr_match": rc.get("asr_match"), "native_ratio": rc.get("native_ratio"), "brand": {"agm": bool(BRAND_AGM.search(asr)), "agmm_letters": bool(BRAND_AGMM.search(asr))},
-                    "frags": rc.get("frags"), "variant_idx": rc.get("tts_variant"), "sim_ref": rc.get("speaker_sim"), "spot_fail": len(rc.get("spot_fail") or []), "n_script_words": len(rc["text"].split()),
-                    "tail_heard": (" ".join((rc.get("asr_text") or "").split()[-4:]) + " | " + " ".join(((rc.get("asr_variants") or {}).get("small.en") or "").split()[-4:])) if key in ("P5", "P7") else None})
+                    "frags": rc.get("frags"), "variant_idx": rc.get("tts_variant"), "sim_ref": rc.get("speaker_sim"), "spot_fail": len(rc.get("spot_fail") or []), "n_script_words": len(rc["text"].split()), "recall": _recall(rc["text"], rc.get("asr_text") or "", (rc.get("asr_variants") or {}).get("small.en") or ""),
+                    "tail_heard": (" ".join((rc.get("asr_text") or "").split()[-4:]) + " | " + " ".join(((rc.get("asr_variants") or {}).get("small.en") or "").split()[-4:])) if CLS.get(key) in ("turn", "cta") else None})
         json.dump(pub, open(os.path.join(out, stem + ".delivery.json"), "w"))
         print(stem, "ok", flush=True)
 
