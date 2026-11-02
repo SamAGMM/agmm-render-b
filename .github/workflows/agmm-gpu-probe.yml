@@ -142,17 +142,17 @@ jobs:
               node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "$P" out/pair$i.mp4 2>&1 | tee -a timing.txt | tail -3
               ffmpeg -nostdin -v error -i out/pair$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $6}' > out/pair$i.md5
               ffmpeg -nostdin -v error -i out/span$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $6}' > out/main$i.md5
-              python3 - "$i" "$FPS" "$P" <<'PY' | tee -a pairs.txt
-              import sys
-              i, f, p = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
-              a = [x.strip() for x in open('out/main%s.md5' % i)]; b = [x.strip() for x in open('out/pair%s.md5' % i)]
-              r = p / f; n = same = 0
-              for k, h in enumerate(a):
-                  j = k * r
-                  if abs(j - round(j)) < 1e-6 and int(round(j)) < len(b):
-                      n += 1; same += (b[int(round(j))] == h)
-              print('PAIR span%s: main %d frames at %g fps, pair %d frames at %g fps, %d comparable frames, %d identical' % (i, len(a), f, len(b), p, n, same))
-              PY
+          python3 - "$i" "$FPS" "$P" <<'PY' | tee -a pairs.txt
+          import sys
+          i, f, p = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+          a = [x.strip() for x in open('out/main%s.md5' % i)]; b = [x.strip() for x in open('out/pair%s.md5' % i)]
+          r = p / f; n = same = 0
+          for k, h in enumerate(a):
+              j = k * r
+              if abs(j - round(j)) < 1e-6 and int(round(j)) < len(b):
+                  n += 1; same += (b[int(round(j))] == h)
+          print('PAIR span%s: main %d frames at %g fps, pair %d frames at %g fps, %d comparable frames, %d identical' % (i, len(a), f, len(b), p, n, same))
+          PY
             fi
             i=$((i+1))
           done
