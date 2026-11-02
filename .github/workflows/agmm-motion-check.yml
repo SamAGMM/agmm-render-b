@@ -51,11 +51,12 @@ jobs:
           ls filmart/assets/timeline.json 2>/dev/null || true
       - name: Motion check
         run: |
-          set -uo pipefail
+          set +e
           ARGS=""
           if [ -n "${{ inputs.story_end }}" ]; then ARGS="--story-end ${{ inputs.story_end }}"; elif [ -f filmart/assets/timeline.json ]; then ARGS="--timeline filmart/assets/timeline.json"; fi
-          python3 private/hailmary/kit-v7/motion_check.py "art/${{ inputs.file }}" --out mc_out $ARGS ${{ inputs.extra }} 2>&1 | tee mc_out.txt
-          RC=${PIPESTATUS[0]}
+          python3 private/hailmary/kit-v7/motion_check.py "art/${{ inputs.file }}" --out mc_out $ARGS ${{ inputs.extra }} > mc_out.txt 2>&1
+          RC=$?
+          cat mc_out.txt
           mkdir -p mc_out && cp mc_out.txt mc_out/motion.txt
           echo "motion_check exit code $RC"
           echo "$RC" > mc_out/exit_code.txt
