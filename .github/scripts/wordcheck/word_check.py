@@ -485,6 +485,7 @@ def run_mix(a):
         cls = para_class(key, text, first); classes[key] = cls
         for tk, _o in expected_tokens(text, cls):
             exp_all.append(tk); own.append(key)
+    words_all = words
     ht = heard_tokens(words)
     st, extra_idx = align(exp_all, ht)
     takes = {}
@@ -499,6 +500,7 @@ def run_mix(a):
         rec = build_take(key, text, cls, pw, gaps, ps, pe, None, None)
         if not rec["judge"]["pass"]:       # the Whisper words nobody matched near this paragraph (so a merged token like agmm.co.uk can be seen); failing lines only
             matched = {ht[st[i][1]]["wi"] for i in range(len(st)) if st[i][1] is not None}
+            if cls == "cta": rec["last_words"] = [{"t": w["t"], "s": round(w["s"], 2), "e": round(w["e"], 2), "p": round(float(w["p"]), 2)} for w in words_all[-6:]]      # what Whisper wrote at the very end of the mix (CTA diagnosis)
             rec["unmatched_heard"] = [{"t": w["t"], "s": round(w["s"], 2), "p": round(float(w["p"]), 2)} for wi, w in enumerate(words) if wi not in matched and (not pw or ps - 1.0 <= w["s"] <= pe + 4.0)][:12]
         rec.update({"key": key, "take": 0, "tag": "mix", "stem": key, "source": "mix", "para_start": ps, "para_end": pe, "silence_source": "voice stem energy" if stem_runs is not None else "word gaps"})
         takes["mix/%s" % key] = rec
