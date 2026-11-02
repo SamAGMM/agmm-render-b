@@ -1,0 +1,222 @@
+name: AGMM gpu probe
+run-name: AGMM gpu probe ${{ inputs.label }}
+# GPU vs SwiftShader probe (2 Nov 2026), pool B only. Renders the same short spans of a Hail Mary film page on each runner label, records the WebGL renderer
+# string and seconds per frame, then compares the pixels (PSNR/SSIM against the ubuntu-22.04 SwiftShader render, black-frame check, 540 px contact sheet).
+# The film comes from the PRIVATE repo via the read-only deploy key. Nothing renders on the Mac.
+on:
+  workflow_dispatch:
+    inputs:
+      private_commit: { description: 40-hex commit of agmm-video-render holding the film folder, required: true }
+      project_path: { description: film folder inside that commit, required: true }
+      label: { description: short label, required: true }
+      runners: { description: 'JSON list of runs-on labels', required: false, default: '["macos-14","macos-15","ubuntu-22.04"]' }
+      spans: { description: 'JSON list of span start seconds (empty list = auto: middle of the crowd stretch and just after the reveal)', required: false, default: '[]' }
+      nframes: { description: frames per span, required: false, default: '6' }
+      scale: { description: device scale, required: false, default: '2' }
+      fps: { description: frames per second, required: false, default: '30' }
+      workers: { description: 'browsers', required: false, default: '1' }
+      keep_video: { description: 'yes = upload the lossless spans (1 day) and compare against ubuntu-22.04', required: false, default: 'yes' }
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runners) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+      - name: Machine
+        run: |
+          set -x
+          uname -a; sw_vers 2>/dev/null || true
+          sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string 2>/dev/null || (nproc; free -g | head -2)
+          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
+          date -u +%FT%TZ
+      - name: Runtime (ffmpeg, Node 22)
+        run: |
+          set -euo pipefail
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64)
+              curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-darwin-arm64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+              echo "$RUNNER_TEMP/node-v22.12.0-darwin-arm64/bin" >> "$GITHUB_PATH"
+              ( time brew install --quiet ffmpeg ) 2>&1 | tail -4 ;;
+            Linux-x86_64)
+              curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+              curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+              echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+              echo "$RUNNER_TEMP/node-v22.12.0-linux-x64/bin" >> "$GITHUB_PATH" ;;
+          esac
+      - name: Film assets and openfilm (same timeout patches as par3)
+        run: |
+          set -euo pipefail
+          cp -r "private/${{ inputs.project_path }}" film
+          ( cd film && [ -f fetch_3d.py ] && python3 fetch_3d.py || true )
+          npm install --prefix "$RUNNER_TEMP/of" openfilm@0.2.5 --no-audit --no-fund --loglevel=error
+          python3 - <<'PY'
+          import os, re
+          R = os.environ["RUNNER_TEMP"] + "/of/node_modules/openfilm/src/"
+          def sub(f, a, b):
+              s = open(R + f).read(); assert a in s, (f, a); open(R + f, "w").write(s.replace(a, b))
+          sub("host.mjs", "timeoutMs = 60_000 } = {}) {", "timeoutMs = Number(process.env.OF_FRAME_MS || 60000) } = {}) {")
+          sub("host.mjs", "const CAPTURE_MS = 30_000;", "const CAPTURE_MS = Number(process.env.OF_CAPTURE_MS || 30000);")
+          sub("host.mjs", "waitMs = 10_000, readyMs = READY_MS", "waitMs = Number(process.env.OF_WAIT_MS || 10000), readyMs = READY_MS")
+          sub("host.mjs", "const READY_MS = 60_000;", "const READY_MS = Number(process.env.OF_READY_MS || 60000);")
+          sub("timeline.mjs", "performance.now() - t0 > 10000) throw new Error(`${c.row.src}: window.film", "performance.now() - t0 > 120000) throw new Error(`${c.row.src}: window.film")
+          # optional escape hatch for GPU experiments: OF_EXTRA_ARGS adds chromium switches (space separated) and OF_NO_METAL drops the darwin default --use-angle=metal
+          sub("host.mjs", "...extra];", "...extra, ...(process.env.OF_EXTRA_ARGS ? process.env.OF_EXTRA_ARGS.split(' ') : [])];")
+          print("patched")
+          PY
+          node --check "$RUNNER_TEMP/of/node_modules/openfilm/src/host.mjs"
+          ( cd "$RUNNER_TEMP/of" && time node node_modules/playwright-core/cli.js install chromium-headless-shell ) 2>&1 | tail -4
+      - name: Which WebGL renderer does headless Chromium get
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/gl.mjs" <<JS
+          import { launch } from '$RUNNER_TEMP/of/node_modules/openfilm/src/host.mjs';
+          const b = await launch();
+          const p = await b.newPage();
+          const info = await p.evaluate(() => {
+            const c = document.createElement('canvas'); const gl = c.getContext('webgl2');
+            if (!gl) return { webgl2: false };
+            const e = gl.getExtension('WEBGL_debug_renderer_info');
+            return { webgl2: true, vendor: e ? gl.getParameter(e.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR), renderer: e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER), maxTex: gl.getParameter(gl.MAX_TEXTURE_SIZE), samples: gl.getParameter(gl.MAX_SAMPLES) };
+          });
+          console.log('GLINFO ' + JSON.stringify(info), 'chromium', b.version());
+          await b.close();
+          JS
+          node "$RUNNER_TEMP/gl.mjs" 2>&1 | tee gl.txt
+      - name: Render the spans, timing every frame
+        env:
+          OF_FRAME_MS: '900000'
+          OF_CAPTURE_MS: '300000'
+          OF_WAIT_MS: '90000'
+          OF_READY_MS: '180000'
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cat > "$RUNNER_TEMP/run.mjs" <<JS
+          import { render } from '$RUNNER_TEMP/of/node_modules/openfilm/src/render.mjs';
+          const [dir, a, b, scale, workers, fps, out] = process.argv.slice(2);
+          const t0 = Date.now(); const stamps = [];
+          const r = await render([dir, a + '-' + b], { scale: Number(scale), workers: Number(workers), fps: Number(fps), out, silent: true,
+            onProgress: (d, t) => stamps.push((Date.now() - t0) / 1000),
+            format: { video: ['-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '0', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv'], pix: 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p' } });
+          console.log(r.lines.join('\n'));
+          const gaps = stamps.slice(1).map((v, i) => v - stamps[i]);
+          const steady = gaps.length ? gaps.reduce((x, y) => x + y, 0) / gaps.length : 0;
+          console.log('TIMING first_frame_s=' + (stamps[0] || 0).toFixed(1) + ' steady_s_per_frame=' + steady.toFixed(2) + ' gaps=' + gaps.map((g) => g.toFixed(1)).join(',') + ' wall_s=' + ((Date.now() - t0) / 1000).toFixed(1));
+          JS
+          read -r SPANS < <(python3 - <<'PY'
+          import json
+          tl = json.load(open('film/assets/timeline.json')); A = tl['a']; W = tl['world_at']
+          R = tl.get('choreo', {}).get('t', {}).get('reveal_end', W + 1.2)
+          s = json.loads('${{ inputs.spans }}')
+          if not s: s = [round((float(A['ten']) + float(W)) / 2, 2), round(float(R) + 1.5, 2)]
+          print(' '.join(str(v) for v in s))
+          PY
+          )
+          N=${{ inputs.nframes }}; FPS=${{ inputs.fps }}
+          i=0
+          for S in $SPANS; do
+            E=$(python3 -c "print(round($S + $N/$FPS, 4))")
+            echo "=== span $i: $S - $E ($N frames at $FPS fps, scale ${{ inputs.scale }}, ${{ matrix.runner }})"
+            node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" out/span$i.mp4 2>&1 | tee -a timing.txt | tail -6
+            ffmpeg -nostdin -v error -i out/span$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $1","$2","$6}' > out/span$i.md5
+            i=$((i+1))
+          done
+          ls -la out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: probe-${{ inputs.label }}-text-${{ matrix.runner }}
+          path: |
+            gl.txt
+            timing.txt
+            out/*.md5
+          retention-days: 3
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: inputs.keep_video == 'yes'
+        with:
+          name: probe-${{ inputs.label }}-video-${{ matrix.runner }}
+          path: out/*.mp4
+          retention-days: 1
+  compare:
+    needs: probe
+    if: ${{ always() && inputs.keep_video == 'yes' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: probe-${{ inputs.label }}-video-*
+          path: v
+      - name: Runtime
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --quiet pillow numpy
+      - name: Compare every runner with the ubuntu-22.04 SwiftShader render
+        run: |
+          set -euo pipefail
+          ls -R v | head -30
+          REF=$(ls -d v/probe-*-video-ubuntu-22.04 2>/dev/null | head -1 || true)
+          for d in v/probe-*-video-*; do
+            name=${d##*-video-}
+            for f in $d/span*.mp4; do
+              b=$(basename $f .mp4)
+              echo "== $name $b: $(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames,width,height,r_frame_rate -of csv=p=0 $f)"
+              # per-frame mean luma, min over frames (a black frame shows as ~16 in limited range) and a sharpness proxy (mean edge energy)
+              ffmpeg -nostdin -v error -i $f -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -f null - | grep YAVG | awk -F= '{printf "%s ", $2} END {print ""}' | sed 's/^/luma_yavg: /'
+              if [ -n "$REF" ] && [ "$d" != "$REF" ]; then
+                ffmpeg -nostdin -v error -i $f -i $REF/$b.mp4 -lavfi "[0:v][1:v]psnr=stats_file=psnr_${name}_$b.log;[0:v][1:v]ssim=stats_file=ssim_${name}_$b.log" -f null - 2>&1 | tail -2 || true
+                echo -n "psnr_y per frame vs ubuntu SwiftShader: "; awk '{for(i=1;i<=NF;i++) if($i ~ /^psnr_y:/){split($i,a,":"); printf "%s ", a[2]}} END {print ""}' psnr_${name}_$b.log
+                echo -n "ssim_all per frame: "; awk '{for(i=1;i<=NF;i++) if($i ~ /^All:/){split($i,a,":"); printf "%s ", a[2]}} END {print ""}' ssim_${name}_$b.log
+              fi
+            done
+          done 2>&1 | tee compare.txt
+          # contact sheet: first frame of span0 of each runner, 540 px wide, side by side, then a 4x crop of a detail so antialiasing is visible
+          python3 - <<'PY'
+          import glob, subprocess, os
+          from PIL import Image
+          tiles = []
+          for d in sorted(glob.glob('v/probe-*-video-*')):
+              name = d.split('-video-')[1]
+              for span in ('span0', 'span1'):
+                  f = f'{d}/{span}.mp4'
+                  if not os.path.exists(f): continue
+                  subprocess.run(['ffmpeg','-nostdin','-y','-v','error','-i',f,'-vf','select=eq(n\\,3)','-frames:v','1','full.png'],check=True)
+                  im = Image.open('full.png').convert('RGB')
+                  W,H = im.size
+                  tiles.append((name+' '+span, im.resize((540, int(540*H/W)), Image.LANCZOS), im.crop((W//2-135, H//2-240, W//2+135, H//2+240)).resize((540, 960), Image.NEAREST)))
+          if tiles:
+              sheet = Image.new('RGB', (540*len(tiles), 960+ 960), 'black')
+              for i,(n,a,c) in enumerate(tiles):
+                  sheet.paste(a,(540*i,0)); sheet.paste(c,(540*i,960))
+              sheet.convert('RGB').save('contact.jpg', quality=80)
+              print('sheet', [t[0] for t in tiles], sheet.size)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: probe-${{ inputs.label }}-compare
+          path: |
+            compare.txt
+            contact.jpg
+          retention-days: 1
+          if-no-files-found: ignore
