@@ -1,65 +1,11 @@
 {
  "private_commit": "ea67f779928a39b7d18625a6fc06a6e05b8a703b",
- "label": "v6a",
+ "label": "v6b",
  "films": [
   {
-   "film": "H12",
-   "run": "41509957923",
-   "md5": "b07647296182689a22c52697e10611a9",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H13",
-   "run": "41510377804",
-   "md5": "e723aa6ec9210f9fb16606820fcfd8e3",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H14",
-   "run": "41509869564",
-   "md5": "15d308a6f8cbfbbaf3e72d8125ba8ae5",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H15",
-   "run": "41509741627",
-   "md5": "a9969721a8843473268a448f4ce32b8d",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H16",
-   "run": "41509619800",
-   "md5": "04b3e8c5388ba047b6971a03b8e879cb",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H17",
-   "run": "41509828678",
-   "md5": "a0e26fd341979b70be46531b2ade629a",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H18",
-   "run": "41510226563",
-   "md5": "69829b4932ae26ecb1b1e4cb3f143d00",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H19",
-   "run": "41510402762",
-   "md5": "a0d9434e2abb2f1049d23c2b5dba8f69",
-   "file": "SHARE.mp4"
-  },
-  {
    "film": "H20",
-   "run": "41478718907",
+   "run": "41488621794",
    "md5": "c94995efb88ce5b3363ea696793ee28e",
-   "file": "SHARE.mp4"
-  },
-  {
-   "film": "H21",
-   "run": "41509806568",
-   "md5": "46930ee546375677a8999268570a51af",
    "file": "SHARE.mp4"
   }
  ]
