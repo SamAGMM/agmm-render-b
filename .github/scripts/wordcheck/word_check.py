@@ -2,6 +2,17 @@
 """word_check.py: the WORD GATE for the AGMM Hail Mary shorts (27 Oct 2026, Sam 18:15: "it just goes silent in some areas and forgets to pronounce
 the words and pronounce them correctly").
 
+CALIBRATED 2 NOV 2026 (Sam/coordinator, after H23, H24, H12 and H28 good takes failed the gate):
+  - silence inside a line: up to 0.9 s PASSES, 0.9 to 1.2 s is a WARN, over 1.2 s FAILS (hook line too; the old "one hook pause" count is gone). The turn line's pre-name breath limit (0.30 s) is unchanged.
+  - agmm.co.uk / AGMM.co.UK / A.G.M.M. co.uk / "agmm dot co dot uk" in any spelling is expanded to a g m m dot co dot u k before alignment, on both sides.
+  - numbers are collapsed to one value token on both sides: 1999 = nineteen ninety nine, $125 million = a hundred and twenty five million dollars, 4,000 = four thousand,
+    1931 = nineteen thirty one. Currency words (pound/pounds/dollar/dollars) are equal. British and US spellings are equal (realised/realized, draughtsman/draftsman, millimetres/millimeters, grey/gray, colour/color ...).
+  - four/for and two/to/too count as the right word only when Whisper's word probability is 0.9 or above.
+  - a right word with a low probability: under 0.15 FAILS, 0.15 to 0.5 is a WARN (letters and "AI": FAIL under 0.05, WARN under 0.30); more than 2 WARN words in one line FAIL.
+  - "A.I." / "A I" / "AI" / "ai" are one word on both sides.
+  - a failing mix paragraph carries unmatched_heard (the Whisper words nobody matched) so a merged token like "agmm.co.uk" can be seen in words.json.
+  Missing, replaced and extra words, silent words and the reveal / CTA checks are unchanged. Backup: word_check.py.bak-2026-11-02.
+
 One file, three jobs:
 
   run       (GitHub Actions only: needs numpy, soundfile, faster-whisper; NO media processing on the Mac)
@@ -17,8 +28,8 @@ One file, three jobs:
 FAIL conditions for a line (a take, or a paragraph of the final mix):
   1. a script word is missing, out of order or replaced (numbers are normalised both ways: "33,000" = "thirty three thousand", "a hundred" = "100")
   2. a heard word that is not in the script (stray tail, "thank you", a repeated word)
-  3. a heard word with probability under P_MIN (calibrated on the known bad H05 takes)
-  4. silence inside a spoken line longer than 0.6 s (the hook line may have ONE pause up to 0.7 s)
+  3. a heard word with probability under 0.15 (0.15 to 0.5 only warns; letters / AI under 0.05)
+  4. silence inside a spoken line longer than 1.2 s (0.9 to 1.2 s only warns; was 0.6 s, hook 0.7 s)
   5. the reveal not heard as AGM (not AGMM, AGN, AKGN ...)
   6. the CTA not heard as A G M M dot co dot U K
   7. the turn line: more than 0.3 s of silence immediately before the reveal word (one breath)
@@ -31,8 +42,12 @@ import argparse, difflib, glob, hashlib, json, os, re, sys
 VERSION = 1
 THR = {"p_min": 0.50,            # lowest accepted Whisper word probability (calibration in VOICE-V3.md: 0.50 fails ~25% of otherwise matching takes; every known bad H05 take fails on replaced words at any value)
        "p_min_letter": 0.30,     # the spelled letters (A G M, A G M M, U K) are one Whisper token each and read lower
-       "sil_max": 0.60,          # silence inside a line
-       "hook_sil_max": 0.70,     # the single hook pause
+       "p_fail": 0.15,           # 2 Nov: a right word under this FAILS; between this and p_min it is a WARN
+       "p_fail_letter": 0.05,    # same for the spelled letters and AI
+       "warn_words_max": 2,      # more WARN-band words than this in one line FAIL
+       "p_homophone": 0.90,      # four/for, two/to/too count only at this probability or above
+       "sil_max": 0.90,          # 2 Nov: silence inside a line up to this passes (was 0.60 / hook 0.70)
+       "sil_warn_max": 1.20,     # 0.90 to 1.20 WARN, over this FAILS
        "breath_max": 0.30,       # silence right before the reveal word
        "word_silent_db": 42.0,   # a heard word whose loudest 20 ms is this far under the line's p95 level was not spoken (30 flagged quiet "then")
        "hook_lo": 185.0, "hook_hi": 195.0}
@@ -44,7 +59,25 @@ TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eight
 NUMW = set(ONES + [t for t in TENS if t] + ["hundred", "thousand", "million", "billion"])
 SPELL = {"metres": "metres", "meters": "metres", "metre": "metre", "meter": "metre", "kilometers": "kilometres", "kilometre": "kilometres", "kilometres": "kilometres",
          "kilometer": "kilometre", "okay": "ok", "tonnes": "tonnes", "tons": "tonnes", "ton": "tonne", "centre": "center", "grey": "gray", "colour": "color",
-         "chord": "cord", "rose": "rows", "plow": "plough", "kilograms": "kilos", "kilogram": "kilo", "kgs": "kilos", "kg": "kilo"}
+         "chord": "cord", "rose": "rows", "plow": "plough", "kilograms": "kilos", "kilogram": "kilo", "kgs": "kilos", "kg": "kilo",
+         "pound": "pounds", "dollar": "dollars", "$dollars": "dollars"}
+# 2 Nov: British and US spellings are the same word (US form is canonical)
+_BRIT = {}
+for _us, _uk in (("realized", "realised"), ("realize", "realise"), ("realizing", "realising"), ("realization", "realisation"), ("organized", "organised"), ("organize", "organise"),
+                 ("organizing", "organising"), ("organization", "organisation"), ("organizations", "organisations"), ("recognized", "recognised"), ("recognize", "recognise"),
+                 ("analyzed", "analysed"), ("analyze", "analyse"), ("analyzing", "analysing"), ("apologize", "apologise"), ("specialized", "specialised"), ("prioritize", "prioritise"),
+                 ("prioritized", "prioritised"), ("optimize", "optimise"), ("optimized", "optimised"), ("optimizing", "optimising"), ("minimize", "minimise"), ("maximize", "maximise"),
+                 ("standardized", "standardised"), ("summarize", "summarise"), ("summarized", "summarised"), ("customize", "customise"), ("customized", "customised"),
+                 ("capitalize", "capitalise"), ("emphasize", "emphasise"), ("criticize", "criticise"), ("authorized", "authorised"), ("utilize", "utilise"), ("visualize", "visualise"),
+                 ("draftsman", "draughtsman"), ("draftsmen", "draughtsmen"), ("millimeters", "millimetres"), ("millimeter", "millimetre"), ("centimeters", "centimetres"),
+                 ("centimeter", "centimetre"), ("color", "colour"), ("colors", "colours"), ("colored", "coloured"), ("favor", "favour"), ("favorite", "favourite"),
+                 ("behavior", "behaviour"), ("honor", "honour"), ("neighbor", "neighbour"), ("labor", "labour"), ("harbor", "harbour"), ("flavor", "flavour"), ("humor", "humour"),
+                 ("liter", "litre"), ("liters", "litres"), ("theater", "theatre"), ("fiber", "fibre"), ("caliber", "calibre"), ("defense", "defence"), ("offense", "offence"),
+                 ("catalog", "catalogue"), ("jewelry", "jewellery"), ("traveled", "travelled"), ("traveling", "travelling"), ("canceled", "cancelled"),
+                 ("modeling", "modelling"), ("modeled", "modelled"), ("labeled", "labelled"), ("aluminum", "aluminium"), ("skeptical", "sceptical"), ("mold", "mould"), ("sulfur", "sulphur")):
+    _BRIT[_uk] = _us
+for _uk, _us in _BRIT.items(): SPELL.setdefault(_uk, _us)
+SPELL.update({"grey": "gray", "colour": "color", "centre": "center"})
 
 
 def say(n):
@@ -67,8 +100,11 @@ def _num(m):
 def _word_tokens(raw, mode="auto"):
     """one whitespace word -> canonical tokens. mode 'reveal': AGMM = A G M; 'cta': AGMM = A G M M."""
     t = (raw or "").lower().replace("\u2019", "'").replace("&", " and ")
+    if re.sub(r"[^a-z0-9]", "", t) in ("agmmcouk", "agmmdotcodotuk", "agmmdotcouk", "agmmcodotuk"):      # 2 Nov: Whisper writes the domain as ONE token (agmm.co.uk, AGMM.co.UK, A.G.M.M.co.uk)
+        return ["a", "g", "m", "m", "dot", "co", "dot", "u", "k"]
     pound = "\u00a3" in t
-    t = t.replace("\u00a3", " ")
+    dollar = "$" in t
+    t = t.replace("\u00a3", " ").replace("$", " ")
     t = re.sub(r"(?<=[a-z0-9])\.(?=[a-z]{2,}\b)", " dot ", t)            # agmm.co.uk -> agmm dot co dot uk
     t = re.sub(r"^\.(?=[a-z]{2,}\b)", "dot ", t)                          # ".co" ".uk" (Whisper writes "AGMM .co .uk")
     t = re.sub(r"\d[\d,]*(?:\.\d+)?", _num, t)
@@ -83,32 +119,88 @@ def _word_tokens(raw, mode="auto"):
         elif w == "uk": out += ["u", "k"]
         else: out.append(SPELL.get(w, w))
     if pound and out: out.append("\u00a3pounds")
+    if dollar and out: out.append("$dollars")
+    return out
+
+
+CUR = {"\u00a3pounds": "pounds", "$dollars": "dollars"}
+MULT = ("million", "thousand", "billion")
+NUMSET = set(ONES + [t for t in TENS if t] + ["hundred", "thousand", "million", "billion"])
+
+
+def _card(ws):
+    """number words -> integer, or None if the words are not one valid cardinal ('nineteen ninety nine' is not)."""
+    total, grp, lastm = 0, 0, 10 ** 12
+    for w in ws:
+        if w in ONES:
+            v = ONES.index(w); low = grp % 100
+            if v < 10 and not (low == 0 or (low >= 20 and low % 10 == 0)): return None
+            if v >= 10 and low != 0: return None
+            if v == 0 and len(ws) > 1: return None
+            grp += v
+        elif w in TENS:
+            if grp % 100 != 0: return None
+            grp += TENS.index(w) * 10
+        elif w == "hundred":
+            if not (0 < grp < 100): return None
+            grp *= 100
+        else:
+            m = {"thousand": 10 ** 3, "million": 10 ** 6, "billion": 10 ** 9}[w]
+            if grp == 0 or m >= lastm: return None
+            total += grp * m; grp = 0; lastm = m
+    return total + grp
+
+
+def _year(ws):
+    """'nineteen ninety nine' = 1999, 'twenty twenty' = 2020, 'nineteen hundred' = 1900"""
+    if len(ws) < 2: return None
+    a = _card(ws[:1])
+    if a is None or not (11 <= a <= 20): return None
+    rest = ws[1:]
+    if rest == ["hundred"]: return a * 100
+    if any(w in ("hundred", "thousand", "million", "billion") for w in rest): return None
+    r = _card(rest)
+    return a * 100 + r if r is not None and 0 <= r < 100 else None
+
+
+def _collapse(toks):
+    """runs of number words -> one '#value' token (owner = first word), so 1999 = nineteen ninety nine and 125 million = a hundred and twenty five million"""
+    out, i, n = [], 0, len(toks)
+    while i < n:
+        if toks[i][0] not in NUMSET: out.append(toks[i]); i += 1; continue
+        j = i
+        while j < n and toks[j][0] in NUMSET: j += 1
+        run = [w for w, _ in toks[i:j]]; k0 = i
+        while run:
+            for k in range(len(run), 0, -1):
+                v = _card(run[:k])
+                if v is None: v = _year(run[:k])
+                if v is not None:
+                    out.append(("#%d" % v, toks[k0][1])); run = run[k:]; k0 += k; break
+            else:
+                out.append((run[0], toks[k0][1])); run = run[1:]; k0 += 1
+        i = j
     return out
 
 
 def _cross(toks):
-    """toks: [(tok, owner)] -> cross-word fixes: 'a i' = ai, 'a hundred' = 'one hundred', 'hundred and fifty' = 'hundred fifty', GBP1 million = a million pounds"""
+    """toks: [(tok, owner)] -> cross-word fixes: 'a i' = ai, 'a hundred' = 'one hundred', 'hundred and fifty' = 'hundred fifty', GBP1 million = a million pounds, then number runs collapsed"""
     res = []
     for i, (w, o) in enumerate(toks):
         if w == "a" and i + 1 < len(toks) and toks[i + 1][0] == "i": res.append(("ai", o)); toks[i + 1] = ("", o); continue
         if w == "": continue
         if w == "a" and i + 1 < len(toks) and toks[i + 1][0] in ("hundred", "thousand", "million"): w = "one"
         if w == "and" and res and res[-1][0] in NUMW and i + 1 < len(toks) and toks[i + 1][0] in NUMW: continue
+        if w == "co" and i + 1 < len(toks) and toks[i + 1][0] == "dot" and (not res or res[-1][0] != "dot"): res.append(("dot", o))      # "AGMM" "co.uk" -> agmm dot co dot uk
         res.append((w, o))
-    fin = []
+    fin, pend = [], None
     for i, (w, o) in enumerate(res):
-        if w == "\u00a3pounds":
-            if i + 1 < len(res) and res[i + 1][0] in ("million", "thousand", "billion"): res[i + 1] = (res[i + 1][0], o); fin.append(("\u00a3?", o)); continue
-            fin.append(("pounds", o)); continue
+        if w in CUR:
+            if i + 1 < len(res) and res[i + 1][0] in MULT: pend = CUR[w]; continue      # the currency word goes after the multiplier that follows
+            fin.append((CUR[w], o)); continue
         fin.append((w, o))
-    out = []
-    for i, (w, o) in enumerate(fin):
-        if w == "\u00a3?":
-            # pounds goes after the multiplier word that follows
-            continue
-        out.append((w, o))
-        if i > 0 and fin[i - 1][0] == "\u00a3?": out.append(("pounds", o))
-    return out
+        if pend and w in MULT: fin.append((pend, o)); pend = None
+    return _collapse(fin)
 
 
 def norm_tokens(text, mode="auto", owners=False):
@@ -140,7 +232,10 @@ def heard_tokens(words):
 
 
 # ---------------------------------------------------------------- alignment and judging
-LETTERS = set("a g m u k".split())
+LETTERS = set("a g m u k ai".split())
+
+
+HOMOPHONES = {frozenset(x) for x in (("#4", "for"), ("#2", "to"), ("#2", "too"))}
 
 
 def align(exp, heard):
@@ -162,6 +257,7 @@ def judge(take, thr=None):
     """take: dict as written by run mode. Returns {'pass': bool, 'reasons': [...] , 'flags': {...}}"""
     T = dict(THR); T.update(thr or {})
     why = []
+    warn = []
     items = take.get("exp") or []
     cls = take.get("cls", "story")
     miss = [it for it in items if it["st"] == "miss"]
@@ -170,22 +266,23 @@ def judge(take, thr=None):
     if rep: why.append("replaced %s" % ", ".join("w%d->%r" % (m["w"], m.get("heard", "?")) for m in rep[:6]))
     ex = take.get("extras") or []
     if ex: why.append("extra heard %s" % ", ".join(repr(e.get("heard")) for e in ex[:5]))
-    low = []
+    low, shaky = [], []
     for k, it in enumerate(items):
         if it["st"] != "ok": continue
         if k == 0: continue      # Whisper's probability for the very first word of a clip is unstable (same audio: 0.84 on one runner, 0.08 on another); a garbled first word shows as replaced/missing instead
         lim = T["p_min_letter"] if it.get("letter") else T["p_min"]
-        if it.get("p") is not None and it["p"] < lim: low.append("w%d p=%.2f" % (it["w"], it["p"]))
+        fl = T["p_fail_letter"] if it.get("letter") else T["p_fail"]
+        if it.get("p") is None: continue
+        if it["p"] < fl: low.append("w%d p=%.2f" % (it["w"], it["p"]))
+        elif it["p"] < lim: shaky.append("w%d p=%.2f" % (it["w"], it["p"]))
     if low: why.append("low confidence %s" % ", ".join(low[:6]))
+    if len(shaky) > T["warn_words_max"]: why.append("several shaky words (p under %.2f) %s" % (T["p_min"], ", ".join(shaky[:6])))
+    elif shaky: warn.append("shaky word (right word, low p) %s" % ", ".join(shaky))
     sil = take.get("silences") or []
-    lim = T["sil_max"]
-    longs = [s for s in sil if s["d"] > lim]
-    if cls == "hook":
-        okp = [s for s in longs if s["d"] <= T["hook_sil_max"]]
-        bad = [s for s in longs if s["d"] > T["hook_sil_max"]] + (okp[1:] if len(okp) > 1 else [])
-    else:
-        bad = longs
+    bad = [s for s in sil if s["d"] > T["sil_warn_max"]]
+    longs = [s for s in sil if T["sil_max"] < s["d"] <= T["sil_warn_max"]]
     if bad: why.append("silence inside the line %s s" % ", ".join("%.2f@%.2f" % (s["d"], s["s"]) for s in bad[:4]))
+    if longs: warn.append("long pause %s s" % ", ".join("%.2f@%.2f" % (s["d"], s["s"]) for s in longs[:4]))
     ws = [it for it in items if it["st"] == "ok" and it.get("rel") is not None and it["rel"] < -T["word_silent_db"]]
     if ws: why.append("word not spoken (silent audio) %s" % ", ".join("w%d" % it["w"] for it in ws[:5]))
     br = take.get("breath")
@@ -193,7 +290,7 @@ def judge(take, thr=None):
     if cls == "reveal" and not take.get("reveal_ok", False): why.append("reveal not heard as A G M")
     if cls == "cta" and not take.get("cta_ok", False): why.append("CTA not heard as A G M M dot co dot U K")
     flags = {"hook_wpm": take.get("hook_wpm"), "hook_pace_ok": (T["hook_lo"] <= take["hook_wpm"] <= T["hook_hi"]) if (cls == "hook" and take.get("hook_wpm")) else None}
-    return {"pass": not why, "reasons": why, "flags": flags}
+    return {"pass": not why, "reasons": why, "warnings": warn, "flags": flags}
 
 
 # ---------------------------------------------------------------- build one take record from heard words + audio facts
@@ -204,6 +301,10 @@ def build_take(key, text, cls, words, silences, first_v, last_v, levels=None, du
     owner = [o for _, o in eo]
     ht = heard_tokens(words)
     st, extra_idx = align(exp, ht)
+    T_ = dict(THR); T_.update(thr or {})
+    for i, (s_, hidx) in enumerate(st):      # 2 Nov: four/for, two/to/too are the right word only when Whisper is sure (p >= 0.9)
+        if s_ == "rep" and hidx is not None and frozenset((exp[i], ht[hidx]["tok"])) in HOMOPHONES and float(words[ht[hidx]["wi"]].get("p", 1.0)) >= T_["p_homophone"]:
+            st[i] = ("ok", hidx)
     items = []
     for i, (s_, hidx) in enumerate(st):
         it = {"w": owner[i], "st": s_, "letter": exp[i] in LETTERS}
@@ -396,6 +497,9 @@ def run_mix(a):
         if stem_runs is not None: gaps = [r for r in stem_runs if r["s"] >= ps - 0.05 and r["e"] <= pe + 0.05]
         else: gaps = [{"s": pw[i]["e"], "e": pw[i + 1]["s"]} for i in range(len(pw) - 1) if pw[i + 1]["s"] - pw[i]["e"] > 0.2]
         rec = build_take(key, text, cls, pw, gaps, ps, pe, None, None)
+        if not rec["judge"]["pass"]:       # the Whisper words nobody matched near this paragraph (so a merged token like agmm.co.uk can be seen); failing lines only
+            matched = {ht[st[i][1]]["wi"] for i in range(len(st)) if st[i][1] is not None}
+            rec["unmatched_heard"] = [{"t": w["t"], "s": round(w["s"], 2), "p": round(float(w["p"]), 2)} for wi, w in enumerate(words) if wi not in matched and (not pw or ps - 1.0 <= w["s"] <= pe + 4.0)][:12]
         rec.update({"key": key, "take": 0, "tag": "mix", "stem": key, "source": "mix", "para_start": ps, "para_end": pe, "silence_source": "voice stem energy" if stem_runs is not None else "word gaps"})
         takes["mix/%s" % key] = rec
         print("mix %s %s %s" % (key, cls, "PASS" if rec["judge"]["pass"] else "FAIL"), flush=True)
@@ -434,8 +538,10 @@ def cmd_read(a):
     ok, res, d = judge_file(a.words, thr, a.only.split(",") if a.only else None)
     for t, r in sorted(res.items()):
         rec = d["takes"].get(t, {})
-        print("%-4s %-22s %s%s" % ("PASS" if r["pass"] else "FAIL", t, "; ".join(r["reasons"]) or "all words heard", (" hook_wpm=%s" % rec.get("hook_wpm")) if rec.get("cls") == "hook" else ""))
-    print("WORDS %s" % ("PASS" if ok else "FAIL"))
+        wn = r.get("warnings") or []
+        print("%-4s %-22s %s%s%s" % ("FAIL" if not r["pass"] else ("WARN" if wn else "PASS"), t, "; ".join(r["reasons"] + ["WARN: " + x for x in wn]) or "all words heard", (" hook_wpm=%s" % rec.get("hook_wpm")) if rec.get("cls") == "hook" else "", (" unmatched_heard=%s" % [u["t"] for u in rec.get("unmatched_heard", [])]) if (not r["pass"] and rec.get("unmatched_heard")) else ""))
+    nw = sum(1 for r in res.values() if r.get("warnings"))
+    print("WORDS %s%s" % ("PASS" if ok else "FAIL", (" (%d line(s) with WARN)" % nw) if nw else ""))
     return 0 if ok else 1
 
 
@@ -512,8 +618,8 @@ def selftest():
         lv = lv if lv is not None else w[-1]["e"]
         return build_take("P", text, cls, w, [{"s": a, "e": b} for a, b in sil], fv, lv, levels)
     # normalisation both ways
-    chk("num both ways", norm_tokens("33,000 hours") == norm_tokens("thirty-three thousand hours") == ["thirty", "three", "thousand", "hours"])
-    chk("a hundred = 100", norm_tokens("a hundred times") == norm_tokens("100 times") == ["one", "hundred", "times"])
+    chk("num both ways", norm_tokens("33,000 hours") == norm_tokens("thirty-three thousand hours") == ["#33000", "hours"])
+    chk("a hundred = 100", norm_tokens("a hundred times") == norm_tokens("100 times") == ["#100", "times"])
     chk("hundred and fifty", norm_tokens("three hundred and fifty six") == norm_tokens("356"))
     chk("pounds sign", norm_tokens("a million pounds") == norm_tokens("£1 million"))
     chk("agmm.co.uk", norm_tokens("AGMM.co.uk.", "cta") == norm_tokens("A. G. M. M. dot co dot U K.", "cta") == "a g m m dot co dot u k".split())
@@ -550,15 +656,25 @@ def selftest():
     chk("out of order fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
     ps = [0.95] * 11; ps[4] = 0.31
     r = take(HOOK, "hook", _w("What if 33,000 hours of meetings all happened at once", p=ps))
-    chk("low confidence fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    chk("p 0.31 right word is a WARN, not a fail (2 Nov)", r["judge"]["pass"] and r["judge"]["warnings"], str(r["judge"]))
+    ps[4] = 0.10
+    r = take(HOOK, "hook", _w("What if 33,000 hours of meetings all happened at once", p=ps))
+    chk("low confidence p 0.10 fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    ps[4] = 0.31; ps[5] = 0.40; ps[6] = 0.45
+    r = take(HOOK, "hook", _w("What if 33,000 hours of meetings all happened at once", p=ps))
+    chk("three shaky words fail", not r["judge"]["pass"], str(r["judge"]["reasons"]))
     r = take(HOOK, "hook", "What if 33,000 hours of meetings all happened at once", sil=[(1.0, 1.65)])
-    chk("hook pause 0.65 s passes", r["judge"]["pass"], str(r["judge"]["reasons"]))
-    r = take(HOOK, "hook", "What if 33,000 hours of meetings all happened at once", sil=[(1.0, 1.75)])
-    chk("hook pause 0.75 s fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
-    r = take(HOOK, "hook", "What if 33,000 hours of meetings all happened at once", sil=[(1.0, 1.65), (2.0, 2.65)])
-    chk("two long hook pauses fail", not r["judge"]["pass"], str(r["judge"]["reasons"]))
-    r = take(ADS, "story", "An AI consultancy that finds where your business is leaking time and money then builds the AI to fix it Faster operations Bigger margins Custom systems that run themselves", sil=[(2.0, 2.7)])
-    chk("0.7 s silence mid story fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    chk("hook pause 0.65 s passes", r["judge"]["pass"] and not r["judge"]["warnings"], str(r["judge"]["reasons"]))
+    r = take(HOOK, "hook", "What if 33,000 hours of meetings all happened at once", sil=[(1.0, 1.85)])
+    chk("hook pause 0.85 s passes (2 Nov)", r["judge"]["pass"] and not r["judge"]["warnings"], str(r["judge"]))
+    r = take(HOOK, "hook", "What if 33,000 hours of meetings all happened at once", sil=[(1.0, 2.05)])
+    chk("hook pause 1.05 s is a WARN", r["judge"]["pass"] and r["judge"]["warnings"], str(r["judge"]))
+    r = take(HOOK, "hook", "What if 33,000 hours of meetings all happened at once", sil=[(1.0, 2.35)])
+    chk("hook pause 1.35 s fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    r = take(ADS, "story", "An AI consultancy that finds where your business is leaking time and money then builds the AI to fix it Faster operations Bigger margins Custom systems that run themselves", sil=[(2.0, 2.85)])
+    chk("0.85 s silence mid story passes", r["judge"]["pass"], str(r["judge"]["reasons"]))
+    r = take(ADS, "story", "An AI consultancy that finds where your business is leaking time and money then builds the AI to fix it Faster operations Bigger margins Custom systems that run themselves", sil=[(2.0, 3.3)])
+    chk("1.3 s silence mid story fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
     r = take(REV, "reveal", "So the building gives way and your last penny drops straight into AGM", sil=[(3.0, 3.45)])
     nm = r.get("name_s", 0)
     r = take(REV, "reveal", _w("So the building gives way and your last penny drops straight into", 0.0) + [{"t": "AGM", "s": 4.6, "e": 5.0, "p": 0.9}], sil=[(4.1, 4.6)])
@@ -572,6 +688,39 @@ def selftest():
     mw = merge_digit_fragments([{"t": "33", "s": 0, "e": 1, "p": .9}, {"t": "000", "s": 1, "e": 2, "p": .8}, {"t": "hours", "s": 2, "e": 3, "p": .9}])
     chk("whisper '33' '000' = 33,000", len(mw) == 2 and mw[0]["t"] == "33,000", str(mw))
     chk("guy's == guys", norm_tokens("One guy's still") == norm_tokens("One guys still"))
+    # ---- 2 Nov calibration
+    CTA2 = "Book the audit at A.G.M.M. dot co dot U K."
+    for h in ("Book the audit at agmm.co.uk", "Book the audit at AGMM.co.uk.", "Book the audit at AGMM.co.UK", "Book the audit at AGMM co.uk", "Book the audit at A.G.M.M.co.uk"):
+        r = take(CTA2, "cta", h)
+        chk("CTA merged token passes: %s" % h, r["judge"]["pass"] and r["cta_ok"], str(r["judge"]["reasons"]))
+    r = take(CTA2, "cta", "Book the audit at AGM.co.uk")
+    chk("CTA with 3 letters merged still fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    chk("1999 = nineteen ninety nine", norm_tokens("In 1999") == norm_tokens("In nineteen ninety nine"))
+    chk("1931 = nineteen thirty one", norm_tokens("1931") == norm_tokens("nineteen thirty one"))
+    chk("$125 million", norm_tokens("$125 million") == norm_tokens("a hundred and twenty five million dollars") == norm_tokens("a hundred and twenty five million dollar"))
+    chk("4,000 / 10", norm_tokens("4,000 and 10") == norm_tokens("four thousand and ten"))
+    chk("US = UK spellings", norm_tokens("realised draughtsman millimetres grey colour") == norm_tokens("realized draftsman millimeters gray color"))
+    P1 = "In 1999 he paid $125 million for the grey draughtsman."
+    r = take(P1, "story", "In nineteen ninety nine he paid 125 million dollars for the gray draftsman")
+    chk("mixed numbers and spellings pass", r["judge"]["pass"], str(r["judge"]["reasons"]))
+    r = take(P1, "story", "In 1999 he paid $125 million for the grey draughtsman")
+    chk("digits both sides pass", r["judge"]["pass"], str(r["judge"]["reasons"]))
+    r = take(P1, "story", "In 1998 he paid $125 million for the grey draughtsman")
+    chk("wrong year still fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    r = take(P1, "story", "In 1999 he paid $152 million for the grey draughtsman")
+    chk("wrong amount still fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    r = take("Take two of them for four", "story", _w("Take to of them for four", p=0.95))
+    chk("homophone to/two at p 0.95 passes", r["judge"]["pass"], str(r["judge"]["reasons"]))
+    r = take("Take two of them for four", "story", _w("Take to of them for four", p=0.80))
+    chk("homophone to/two at p 0.80 fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
+    for ai in ("A.I.", "AI", "ai", "a.i.", "A I"):
+        r = take("builds the AI to fix it", "story", "builds the %s to fix it" % ai)
+        chk("AI spelling %r passes" % ai, r["judge"]["pass"], str(r["judge"]["reasons"]))
+    ps = [0.99] * 6; ps[2] = 0.063
+    r = take("builds the AI to fix it", "story", _w("builds the AI to fix it", p=ps))
+    chk("AI at p 0.063 is a WARN (letter-like), not a fail", r["judge"]["pass"] and r["judge"]["warnings"], str(r["judge"]))
+    r = take("builds the AI to fix it", "story", "builds the to fix it")
+    chk("missing AI still fails", not r["judge"]["pass"], str(r["judge"]["reasons"]))
     print("SELFTEST %s" % ("PASS" if not bad else "FAIL: %s" % bad))
     return 0 if not bad else 1
 
