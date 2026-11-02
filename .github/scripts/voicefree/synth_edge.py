@@ -115,14 +115,14 @@ async def edge_once(text, voice, rate, pitch, mp3, boundary="WordBoundary"):
 def edge_synth(text, voice, rate, pitch, mp3):
     """returns (word events, sentence events, mode). 2 tries with WordBoundary, then 2 with SentenceBoundary (some voice/rate combinations refuse word boundaries)."""
     last = None
-    for i, mode in enumerate(("WordBoundary", "WordBoundary", "SentenceBoundary", "SentenceBoundary")):
+    for i, mode in enumerate(("WordBoundary", "WordBoundary", "WordBoundary", "SentenceBoundary", "SentenceBoundary", "SentenceBoundary")):
         try:
             w, s = asyncio.run(edge_once(text, voice, rate, pitch, mp3, mode))
             return w, s, mode
         except Exception as e:      # noqa: BLE001
             last = e
             print("edge-tts attempt %d (%s, %s %s) failed: %s" % (i + 1, mode, voice, rate, repr(e)[:120]), flush=True)
-            time.sleep(2 + 2 * i)
+            time.sleep(3 + 3 * i)
     raise RuntimeError("edge-tts failed: %s" % repr(last)[:200])
 
 
@@ -176,6 +176,16 @@ def whisper(name):
     return _W[name]
 
 
+ASR_PAD_S = 0.5
+
+
+def padded_copy(y, path):
+    """Whisper is under-confident on the first/last word of a clip that starts 50 ms after the file start (measured 2 Nov: 27 of 80 takes had a first word < 0.70 on correct speech).
+    The ASR check therefore hears a COPY with 0.5 s of silence each side; the delivered wav keeps the 0.05 s pad. Word times are shifted back by ASR_PAD_S."""
+    z = np.zeros(int(ASR_PAD_S * SR), dtype="float32")
+    sf.write(path, np.concatenate([z, y, z]), SR, subtype="PCM_16")
+
+
 def asr(path, name):
     m = whisper(name)
     segs, _ = m.transcribe(path, language="en", beam_size=5, word_timestamps=True, vad_filter=False,
@@ -185,7 +195,7 @@ def asr(path, name):
         for w in (s.words or []):
             t = w.word.strip()
             if t:
-                ws.append({"text": t, "start": round(float(w.start), 3), "end": round(float(w.end), 3), "probability": round(float(w.probability), 4)})
+                ws.append({"text": t, "start": round(float(w.start) - ASR_PAD_S, 3), "end": round(float(w.end) - ASR_PAD_S, 3), "probability": round(float(w.probability), 4)})
     return ws
 
 
@@ -275,8 +285,9 @@ def main():
             sf.write(wav, y, SR, subtype="PCM_24")
             dur = round(len(y) / float(SR), 3)
             # ASR gate (large-v3 strict, medium.en second opinion)
-            wl = asr(wav, "large-v3")
-            wm = asr(wav, "medium.en")
+            pw = os.path.join(tmp, stem + ".asrpad.wav"); padded_copy(y, pw)
+            wl = asr(pw, "large-v3")
+            wm = asr(pw, "medium.en")
             gl, gm = gate(wl, exp, names), gate(wm, exp, names)
             gate_pass = bool(gl["match"] and gl["min_prob"] >= PROB_MIN and gm["match"])
             timing_source = "edge-tts WordBoundary"
