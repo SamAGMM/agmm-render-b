@@ -1,0 +1,69 @@
+name: AGMM motion batch
+run-name: AGMM motion batch ${{ inputs.label }}
+# Runs kit-v7/motion_check.py on the SHARE.mp4 of several par5/par3 runs at once (Linux only), one job per film. Finds the hailmary-* and film-* artifacts of each run by itself
+# (so the dispatcher makes no extra API calls), md5s the SHARE.mp4 and compares it with the md5 of the delivered local file when one is given.
+on:
+  workflow_dispatch:
+    inputs:
+      private_commit: { description: 40-hex commit of agmm-video-render holding hailmary/kit-v7/motion_check.py, required: true }
+      label: { description: short label, required: true }
+      films: { description: 'JSON list of {"film":"H12","run":"<run id>","md5":"<md5 of the local final or empty>","file":"SHARE.mp4"}', required: true }
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        f: ${{ fromJSON(inputs.films) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            hailmary/kit-v7/motion_check.py
+      - name: Runtime (ffmpeg, numpy, pillow)
+        run: |
+          set -euo pipefail
+          for n in 1 2 3 4; do curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP" && break; sleep 15; done
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --quiet --retries 4 numpy pillow
+      - name: Fetch the SHARE.mp4 and the timeline of the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          mkdir -p mc_out
+          gh run download "${{ matrix.f.run }}" -R "${{ github.repository }}" -p 'hailmary-*' -D art 2>&1 | tail -2
+          gh run download "${{ matrix.f.run }}" -R "${{ github.repository }}" -p 'film-*' -D filmart 2>&1 | tail -2 || true
+          V=$(find art -name "${{ matrix.f.file || 'SHARE.mp4' }}" | head -1); echo "video: $V"; ls -la art/* | head
+          M=$(md5sum "$V" | awk '{print $1}'); S=$(stat -c %s "$V")
+          echo "film=${{ matrix.f.film }} run=${{ matrix.f.run }} artifact=$(ls art | head -1) artifact_md5=$M size=$S local_md5=${{ matrix.f.md5 }}" | tee mc_out/md5.txt
+          if [ -n "${{ matrix.f.md5 }}" ]; then if [ "$M" = "${{ matrix.f.md5 }}" ]; then echo "MD5 MATCH" | tee -a mc_out/md5.txt; else echo "MD5 DIFFERENT" | tee -a mc_out/md5.txt; fi; fi
+          echo "$V" > video_path.txt
+      - name: Motion check
+        run: |
+          set +e
+          ARGS=""; T=$(find filmart -name timeline.json -path '*assets*' | head -1); [ -n "$T" ] && ARGS="--timeline $T"
+          python3 private/hailmary/kit-v7/motion_check.py "$(cat video_path.txt)" --out mc_out $ARGS > mc_out/motion.txt 2>&1
+          RC=$?; cat mc_out/motion.txt; echo "$RC" > mc_out/exit_code.txt
+          exit 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: motionbatch-${{ inputs.label }}-${{ matrix.f.film }}
+          path: |
+            mc_out/motion.json
+            mc_out/motion_sheet.png
+            mc_out/motion.txt
+            mc_out/md5.txt
+            mc_out/exit_code.txt
+          retention-days: 7
