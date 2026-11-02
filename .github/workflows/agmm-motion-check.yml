@@ -1,0 +1,74 @@
+name: AGMM motion check
+run-name: AGMM motion check ${{ inputs.label }}
+# Hail Mary V7 motion QA (3 Nov 2026), pool B. Downloads the SHARE.mp4 (or FINAL.mp4) of a par5/par3 run from THIS repo, runs kit-v7/motion_check.py on the runner
+# (frame-to-frame change: pops and jumps incl. a last-frame snap, frozen stretches over 1 s in the story half, white/black/blank frames, judder) and uploads
+# motion.json + motion_sheet.png as artifact motioncheck-<label>. The step fails (red) when the verdict is FAIL. Nothing is processed on the Mac.
+on:
+  workflow_dispatch:
+    inputs:
+      private_commit: { description: 40-hex commit of agmm-video-render holding hailmary/kit-v7/motion_check.py, required: true }
+      run_id: { description: 'par5 / par3 run id whose artifact to check (this repo)', required: true }
+      artifact: { description: 'artifact name, e.g. hailmary-mac10', required: true }
+      file: { description: 'file inside the artifact (SHARE.mp4 = 1080 60 fps, FINAL.mp4 = 4K)', required: false, default: SHARE.mp4 }
+      film_artifact: { description: 'film-<label> artifact of the same run, for assets/timeline.json world_at (story half end). Empty = use story_end or the 62% fallback', required: false, default: '' }
+      story_end: { description: 'seconds where the story half ends (overrides the timeline)', required: false, default: '' }
+      label: { description: short label, required: true }
+      extra: { description: 'extra motion_check.py flags', required: false, default: '' }
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            hailmary/kit-v7/motion_check.py
+      - name: Runtime (ffmpeg, numpy, pillow)
+        run: |
+          set -euo pipefail
+          for n in 1 2 3 4; do curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP" && break; sleep 15; done
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --quiet --retries 4 numpy pillow
+      - name: Fetch the video (and the timeline)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.artifact }}" -D art
+          ls -la art | head
+          test -f "art/${{ inputs.file }}"
+          if [ -n "${{ inputs.film_artifact }}" ]; then gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.film_artifact }}" -D filmart || true; fi
+          ls filmart/assets/timeline.json 2>/dev/null || true
+      - name: Motion check
+        run: |
+          set -uo pipefail
+          ARGS=""
+          if [ -n "${{ inputs.story_end }}" ]; then ARGS="--story-end ${{ inputs.story_end }}"; elif [ -f filmart/assets/timeline.json ]; then ARGS="--timeline filmart/assets/timeline.json"; fi
+          python3 private/hailmary/kit-v7/motion_check.py "art/${{ inputs.file }}" --out mc_out $ARGS ${{ inputs.extra }} 2>&1 | tee mc_out.txt
+          RC=${PIPESTATUS[0]}
+          mkdir -p mc_out && cp mc_out.txt mc_out/motion.txt
+          echo "motion_check exit code $RC"
+          echo "$RC" > mc_out/exit_code.txt
+          exit 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: motioncheck-${{ inputs.label }}
+          path: |
+            mc_out/motion.json
+            mc_out/motion_sheet.png
+            mc_out/motion.txt
+            mc_out/exit_code.txt
+          retention-days: 7
+      - name: Verdict (red when the check fails)
+        run: |
+          RC=$(cat mc_out/exit_code.txt); head -1 mc_out/motion.txt; [ "$RC" = "0" ]
