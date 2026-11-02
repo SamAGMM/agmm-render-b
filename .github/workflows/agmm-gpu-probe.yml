@@ -134,6 +134,8 @@ jobs:
           N=${{ inputs.nframes }}; FPS=${{ inputs.fps }}
           i=0
           for S in $SPANS; do
+            # snap the start to the main frame grid (openfilm rounds the start to the nearest frame at each rate: an off-grid start lands half a frame apart at 30 and 60 fps)
+            S=$(python3 -c "print(round(round($S*$FPS)/$FPS, 6))")
             E=$(python3 -c "print(round($S + $N/$FPS, 4))")
             echo "=== span $i: $S - $E ($N frames at $FPS fps, scale ${{ inputs.scale }}, ${{ matrix.runner }})"
             node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" out/span$i.mp4 2>&1 | tee -a timing.txt | tail -6
