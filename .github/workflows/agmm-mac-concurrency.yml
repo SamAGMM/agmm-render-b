@@ -1,0 +1,28 @@
+name: AGMM mac concurrency
+run-name: AGMM mac concurrency ${{ inputs.label }}
+# How many macOS jobs does this account run at once on the free plan (2 Nov 2026). Every job logs when it really started and holds its slot for N seconds.
+on:
+  workflow_dispatch:
+    inputs:
+      label: { description: short label, required: true }
+      runner: { description: runs-on label, required: false, default: macos-14 }
+      hold: { description: seconds each job holds its slot, required: false, default: '240' }
+      count: { description: jobs, required: false, default: '10' }
+permissions:
+  contents: read
+jobs:
+  hold:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - name: Hold the slot
+        run: |
+          if [ ${{ matrix.n }} -gt ${{ inputs.count }} ]; then echo skip; exit 0; fi
+          echo "job ${{ matrix.n }} started $(date -u +%T)"; sysctl -n hw.ncpu hw.memsize 2>/dev/null || true
+          sleep ${{ inputs.hold }}
+          echo "job ${{ matrix.n }} ended $(date -u +%T)"
