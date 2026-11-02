@@ -1,30 +1,51 @@
 name: AGMM motion batch
-run-name: AGMM motion batch ${{ inputs.label }}
+run-name: AGMM motion batch ${{ inputs.label || 'push' }}
 # Runs kit-v7/motion_check.py on the SHARE.mp4 of several par5/par3 runs at once (Linux only), one job per film. Finds the hailmary-* and film-* artifacts of each run by itself
 # (so the dispatcher makes no extra API calls), md5s the SHARE.mp4 and compares it with the md5 of the delivered local file when one is given.
 on:
+  push:
+    paths: ['.github/motion-batch.json']
   workflow_dispatch:
     inputs:
-      private_commit: { description: 40-hex commit of agmm-video-render holding hailmary/kit-v7/motion_check.py, required: true }
-      label: { description: short label, required: true }
-      films: { description: 'JSON list of {"film":"H12","run":"<run id>","md5":"<md5 of the local final or empty>","file":"SHARE.mp4"}', required: true }
+      private_commit: { description: 40-hex commit of agmm-video-render holding hailmary/kit-v7/motion_check.py, required: false, default: '' }
+      label: { description: short label, required: false, default: '' }
+      films: { description: 'JSON list of {"film":"H12","run":"<run id>","md5":"<md5 of the local final or empty>","file":"SHARE.mp4"}; a push of .github/motion-batch.json {private_commit,label,films} does the same without any API call', required: false, default: '' }
 permissions:
   contents: read
   actions: read
 jobs:
-  check:
+  prep:
     if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-22.04
+    outputs:
+      films: ${{ steps.p.outputs.films }}
+      commit: ${{ steps.p.outputs.commit }}
+      label: ${{ steps.p.outputs.label }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - id: p
+        run: |
+          python3 - <<'PY'
+          import json, os
+          if os.environ.get('GITHUB_EVENT_NAME') == 'push':
+              d = json.load(open('.github/motion-batch.json')); c, l, f = d['private_commit'], d['label'], json.dumps(d['films'])
+          else:
+              c, l, f = '${{ inputs.private_commit }}', '${{ inputs.label }}', '''${{ inputs.films }}'''
+          o = open(os.environ['GITHUB_OUTPUT'], 'a'); o.write('commit=%s\nlabel=%s\nfilms=%s\n' % (c, l, f.replace('\n', ' ')))
+          PY
+  check:
+    needs: prep
     runs-on: ubuntu-22.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        f: ${{ fromJSON(inputs.films) }}
+        f: ${{ fromJSON(needs.prep.outputs.films) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: agmmltd-arch/agmm-video-render
-          ref: ${{ inputs.private_commit }}
+          ref: ${{ needs.prep.outputs.commit }}
           ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
           path: private
           persist-credentials: false
@@ -59,7 +80,7 @@ jobs:
           exit 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: motionbatch-${{ inputs.label }}-${{ matrix.f.film }}
+          name: motionbatch-${{ needs.prep.outputs.label }}-${{ matrix.f.film }}
           path: |
             mc_out/motion.json
             mc_out/motion_sheet.png
