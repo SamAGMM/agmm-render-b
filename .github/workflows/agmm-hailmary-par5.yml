@@ -20,7 +20,7 @@ on:
       voice2_label: { description: label of that run, required: false, default: '' }
       extra_voices: { description: 'more voicefree runs, later ones win per paragraph, space-separated run_id:label', required: false, default: '' }
       segments: { description: 'number of parallel picture segments (1 to 28). macOS runs 5 jobs at once on the free plan, so 5 is the default', required: false, default: '5' }
-      runner: { description: 'runs-on label for the picture: macos-14 (default), macos-15 (identical frames), or ubuntu-22.04 for the old SwiftShader path (then use segments=28 and fps=30)', required: false, default: macos-14 }
+      runner: { description: 'picture runner: mixed (default: segments alternate macos-14 and macos-15, whose frames are md5-identical), macos-14, macos-15, or ubuntu-22.04 for the old SwiftShader path (then use segments=28 and fps=30)', required: false, default: mixed }
       fps: { description: 'frames per second of the picture (openfilm --fps). 60 = default. Pages are pure functions of film time, so cuts, captions and audio stay locked at any rate', required: false, default: '60' }
       preset: { description: 'x264 preset for the segments (medium = openfilm default; faster if the encode is the bottleneck)', required: false, default: medium }
       join: { description: 'copy (default) = join the segments by stream copy: no second lossy encode (proved 27 Oct on a real 4K run: exact frame count, every seam frame equals the segment own frame, PSNR vs the lossless render +1.3 dB over the re-encode). encode = the old x264 slow crf 15 re-encode', required: false, default: copy }
@@ -105,7 +105,11 @@ jobs:
               head, _, m = x.partition('+')
               n = len(head.split(',')) - 1 + (int(m) if m else 0)
           n = max(1, min(28, n))
-          print('segs=' + str(list(range(n))).replace(' ', ''))
+          import json
+          rn = '${{ inputs.runner }}'
+          # mixed = alternate macos-14 and macos-15: their frames are md5-identical (proved 2 Nov), so a film may use both, and two label queues pick up faster than one
+          lab = lambda i: (['macos-14', 'macos-15'][i % 2] if rn == 'mixed' else rn)
+          print('segs=' + json.dumps([{'seg': i, 'r': lab(i)} for i in range(n)], separators=(',', ':')))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -115,12 +119,12 @@ jobs:
           include-hidden-files: true
   picture:
     needs: build
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ matrix.item.r }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        seg: ${{ fromJSON(needs.build.outputs.segs) }}
+        item: ${{ fromJSON(needs.build.outputs.segs) }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -134,12 +138,12 @@ jobs:
           read A B < <(python3 -c "
           import json; tl=json.load(open('assets/timeline.json')); A=tl['a']; T=tl['total']; W=tl['world_at']
           R=tl.get('choreo',{}).get('t',{}).get('reveal_end',W+1.2)
-          N=len(json.loads('${{ needs.build.outputs.segs }}')); i=${{ matrix.seg }}
+          N=len(json.loads('${{ needs.build.outputs.segs }}')); i=${{ matrix.item.seg }}
           fr=int(round(float('${{ inputs.fps }}'))); frames=int(round(T*fr))   # cut frames are counted at the render rate; segment edges are passed to openfilm as seconds
           # (SwiftShader model; on macOS the frame cost is nearly flat, see COSTFLAT below) measured on Actions, 4 vCPU, 1 worker (26 Oct): s/frame 1x -> 2x: crowd 12.4 -> 30.9, eye reveal (full-frame raymarch) 1.3 -> 6.5, Alfred 0.43 -> 1.65; opening taken as crowd/2.6
           SC=float('${{ inputs.scale }}'); hi=SC>=1.5
           def cost(t): return 1.0 if t<A['ten'] else (2.6 if t<W else ((0.55 if hi else 0.27) if t<R else (0.14 if hi else 0.09)))
-          if '${{ inputs.runner }}'.startswith('macos'):
+          if '${{ inputs.runner }}' != 'ubuntu-22.04':
               # COSTFLAT: hardware GL, measured H05 scale 2 on macos-14: crowd 0.31 s/frame, reveal 0.16, so the spread is 2x not 14x; the x264 encode (same for every frame) dominates
               def cost(t): return 1.0 if t<A['ten'] else (1.0 if t<W else (0.6 if t<R else 0.5))
           cs=[cost(f/fr) for f in range(frames)]; tot=sum(cs); cuts=[0]; acc=0.0
@@ -170,9 +174,9 @@ jobs:
           fi
           S=no
           OS="${{ inputs.only_segs }}"
-          if [ -n "$OS" ] && ! echo ",$OS," | grep -q ",${{ matrix.seg }},"; then S=yes; fi
+          if [ -n "$OS" ] && ! echo ",$OS," | grep -q ",${{ matrix.item.seg }},"; then S=yes; fi
           echo "skip=$S" >> "$GITHUB_OUTPUT"
-          echo "reuse=$R" >> "$GITHUB_OUTPUT"; echo "segment ${{ matrix.seg }}: $A - $B reuse=$R skip=$S"
+          echo "reuse=$R" >> "$GITHUB_OUTPUT"; echo "segment ${{ matrix.item.seg }}: $A - $B reuse=$R skip=$S"
       - name: Reuse this segment from the earlier run
         if: steps.rng.outputs.reuse == 'yes' && steps.rng.outputs.skip != 'yes'
         env:
@@ -182,12 +186,12 @@ jobs:
           # the earlier run may still be rendering this segment: wait for its artifact (up to 60 min)
           for i in $(seq 1 60); do
             rm -rf segraw
-            gh run download "${{ inputs.reuse_picture_run }}" -R "${{ github.repository }}" -p "seg-*-${{ matrix.seg }}" -D segraw 2>/dev/null || true
-            if find segraw -name "seg_${{ matrix.seg }}.mp4" | grep -q .; then break; fi
-            echo "waiting for segment ${{ matrix.seg }} of run ${{ inputs.reuse_picture_run }} ($i)"; sleep 60
+            gh run download "${{ inputs.reuse_picture_run }}" -R "${{ github.repository }}" -p "seg-*-${{ matrix.item.seg }}" -D segraw 2>/dev/null || true
+            if find segraw -name "seg_${{ matrix.item.seg }}.mp4" | grep -q .; then break; fi
+            echo "waiting for segment ${{ matrix.item.seg }} of run ${{ inputs.reuse_picture_run }} ($i)"; sleep 60
           done
-          find segraw -name "seg_${{ matrix.seg }}.mp4" -exec cp {} . \; 2>/dev/null || true
-          ls seg_${{ matrix.seg }}.mp4
+          find segraw -name "seg_${{ matrix.item.seg }}.mp4" -exec cp {} . \; 2>/dev/null || true
+          ls seg_${{ matrix.item.seg }}.mp4
           ls -la seg_*.mp4 || true
       - name: Runtime (ffmpeg, Node 22, openfilm 0.2.5 patched)
         if: steps.rng.outputs.reuse != 'yes' && steps.rng.outputs.skip != 'yes'
@@ -250,18 +254,18 @@ jobs:
             export OF_FRAME_MS=$(( ${{ inputs.frame_s }} * 1000 )) OF_CAPTURE_MS=300000 OF_WAIT_MS=90000 OF_READY_MS=180000
             for try in 1 2 3; do
               S0=$(date +%s)
-              if node "$RUNNER_TEMP/run5.mjs" . "$A" "$B" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" "${{ inputs.preset }}" "../seg_${{ matrix.seg }}.mp4" > render.log 2>&1; then echo "segment ${{ matrix.seg }} ($A-$B s, ${{ inputs.fps }} fps, scale ${{ inputs.scale }}, ${{ inputs.runner }}) rendered in $(( $(date +%s) - S0 )) s"; ok=1; break; fi
+              if node "$RUNNER_TEMP/run5.mjs" . "$A" "$B" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" "${{ inputs.preset }}" "../seg_${{ matrix.item.seg }}.mp4" > render.log 2>&1; then echo "segment ${{ matrix.item.seg }} ($A-$B s, ${{ inputs.fps }} fps, scale ${{ inputs.scale }}, ${{ inputs.runner }}) rendered in $(( $(date +%s) - S0 )) s"; ok=1; break; fi
               echo "attempt $try failed after $(( $(date +%s) - S0 )) s:"
               echo "attempt $try failed:"; tail -5 render.log; sleep 8
             done
             tail -6 render.log
-            cp render.log "../timing_${{ matrix.seg }}.txt"
+            cp render.log "../timing_${{ matrix.item.seg }}.txt"
             [ "$ok" = 1 ] || exit 1
           fi
           ls -la ../seg_*.mp4 || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: seg-${{ inputs.label }}-${{ matrix.seg }}
+          name: seg-${{ inputs.label }}-${{ matrix.item.seg }}
           path: |
             seg_*.mp4
             timing_*.txt
