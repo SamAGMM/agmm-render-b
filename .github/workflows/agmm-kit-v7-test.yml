@@ -14,6 +14,7 @@ on:
       nframes: { description: frames per span, required: false, default: '10' }
       spans: { description: 'span start seconds, space separated', required: false, default: '1.0 3.6' }
       fps: { description: fps, required: false, default: '60' }
+      video: { description: 'yes = also render the whole 6 s test film once (first variant, 60 fps, x264 crf 16) on each leg and upload it as kitvideo-<label>-<leg> (input for motion_check)', required: false, default: 'no' }
 permissions:
   contents: read
   actions: read
@@ -143,6 +144,34 @@ jobs:
               i=$((i+1))
             done
           done < "$RUNNER_TEMP/variants.txt"
+      - name: Whole test film as a video (for the motion check)
+        if: ${{ inputs.video == 'yes' }}
+        env:
+          OF_FRAME_MS: '900000'
+          OF_CAPTURE_MS: '300000'
+          OF_WAIT_MS: '120000'
+          OF_READY_MS: '240000'
+          OF_EXTRA_ARGS: ${{ startsWith(matrix.leg.runner, 'macos') && '--disable-gpu-watchdog' || '' }}
+        run: |
+          set +e
+          export PATH="$(ls -d $RUNNER_TEMP/node-v22*/bin | head -1):$PATH"
+          cat > "$RUNNER_TEMP/runv.mjs" <<JS
+          import { render } from '$RUNNER_TEMP/of/node_modules/openfilm/src/render.mjs';
+          const [dir, scale, fps, out] = process.argv.slice(2);
+          const r = await render([dir], { scale: Number(scale), fps: Number(fps), out, silent: true, workers: 1,
+            format: { video: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '16', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv'], pix: 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p' } });
+          console.log(r.lines.join('\n'));
+          JS
+          python3 "$RUNNER_TEMP/setflags.py" ""
+          mkdir -p vid
+          ( cd film && node "$RUNNER_TEMP/runv.mjs" . ${{ matrix.leg.scale }} ${{ inputs.fps }} ../vid/clean.mp4 ) > vid/render.log 2>&1
+          grep -cE "Shader Error|GL broken" vid/render.log; tail -3 vid/render.log; ls -la vid
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ inputs.video == 'yes' }}
+        with:
+          name: kitvideo-${{ inputs.label }}-${{ matrix.leg.name }}
+          path: vid/
+          retention-days: 3
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
