@@ -114,9 +114,9 @@ jobs:
           JS
           cat > "$RUNNER_TEMP/setflags.py" <<'PY'
           import sys
-          s = open('film/film.html.tpl').read().replace('KITFLAGS', sys.argv[1]); open('film/film.html', 'w').write(s)
+          s = open('film/kittest.html.tpl').read().replace('KITFLAGS', sys.argv[1]); open('film/kittest.html', 'w').write(s)
           PY
-          cp film/film.html film/film.html.tpl
+          cp film/kittest.html film/kittest.html.tpl
           FPS=${{ inputs.fps }}; N=${{ inputs.nframes }}; SC=${{ matrix.leg.scale }}; LEG=${{ matrix.leg.name }}
           echo '[]' > out/summary.json
           echo '${{ inputs.variants }}' | python3 -c "import json,sys; [print(v) for v in json.load(sys.stdin)]" > "$RUNNER_TEMP/variants.txt"
