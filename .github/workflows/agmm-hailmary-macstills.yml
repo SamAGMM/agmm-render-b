@@ -1,0 +1,231 @@
+name: AGMM hailmary macstills
+run-name: AGMM hailmary macstills ${{ inputs.label }}
+# macOS STILLS preview (2 Nov 2026): the same page, voice timeline and settings as a par5 final (macos-14 hardware WebGL, scale 2) but only stills, in ONE macOS job,
+# so GPU-only faults (z-fighting, corrupted canvas textures, near-plane clipping, Metal shader link failures) show before a full render. Linux SwiftShader looks miss them.
+# Outputs: artifact stills-<label> (contact sheets + 1080 px JPGs, small) and stills-png-<label> (the full-size PNGs). gl_guard: a page that logs a shader link failure or lost context is drawn again in a fresh browser.
+on:
+  workflow_dispatch:
+    inputs:
+      private_commit: { description: 40-hex commit of agmm-video-render holding the film folder, required: true }
+      project_path: { description: film folder inside that commit, required: true }
+      voice_run_id: { description: voicefree-chatterbox run id with the takes (pool B run), required: true }
+      voice_label: { description: label of that run, required: true }
+      voice_repo: { description: 'repo that holds the voicefree-chatterbox run(s)', required: false, default: SamAGMM/agmm-render-b }
+      label: { description: unique label, required: true }
+      pick: { description: forced takes e.g. P1=2,P4=1, required: false, default: '' }
+      voice2_run_id: { description: optional second voicefree run, required: false, default: '' }
+      voice2_label: { description: label of that run, required: false, default: '' }
+      extra_voices: { description: 'more voicefree runs, space-separated run_id:label', required: false, default: '' }
+      times: { description: 'comma-separated film seconds to draw (e.g. 12,21.5,30). Empty = every `step` seconds from `from` to `to`', required: false, default: '' }
+      step: { description: 'seconds between stills when times is empty', required: false, default: '0.5' }
+      from: { description: 'first second (times empty)', required: false, default: '0' }
+      to: { description: 'last second (times empty); empty = the film end', required: false, default: '' }
+      scale: { description: 'device scale (2 = final 2160x3840)', required: false, default: '2' }
+      runner: { description: 'macos-14 (final settings) or macos-15 (identical frames)', required: false, default: macos-14 }
+      gl_guard: { description: 'yes = draw again in a fresh browser (3 attempts) when the page logs a shader link failure or lost context; fails if it never comes out clean', required: false, default: 'yes' }
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agmm-hailmary-macstills-${{ inputs.label }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      total: ${{ steps.b.outputs.total }}
+      world_at: ${{ steps.b.outputs.world_at }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+      - name: Runtime (static ffmpeg, no apt)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+      - name: Voice pack (decrypt)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VOICEFREE_PASS: ${{ secrets.VOICEFREE_PASS }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.voice_run_id }}" -R "${{ inputs.voice_repo }}" -n "voicefree-chatterbox-${{ inputs.voice_label }}-ENC" -D "$RUNNER_TEMP/vpack"
+          mkdir -p "$RUNNER_TEMP/voice"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice"
+          n=3
+          for rl in ${{ inputs.extra_voices }}; do
+            rid=${rl%%:*}; lab=${rl#*:}
+            gh run download "$rid" -R "${{ inputs.voice_repo }}" -n "voicefree-chatterbox-$lab-ENC" -D "$RUNNER_TEMP/vpack$n"
+            mkdir -p "$RUNNER_TEMP/voice$n"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack$n/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice$n"
+            n=$((n+1))
+          done
+          if [ -n "${{ inputs.voice2_run_id }}" ]; then
+            gh run download "${{ inputs.voice2_run_id }}" -R "${{ inputs.voice_repo }}" -n "voicefree-chatterbox-${{ inputs.voice2_label }}-ENC" -D "$RUNNER_TEMP/vpack2"
+            mkdir -p "$RUNNER_TEMP/voice2"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:VOICEFREE_PASS -in "$RUNNER_TEMP/vpack2/synth-pack.enc" | tar -x -C "$RUNNER_TEMP/voice2"
+          fi
+      - name: Python packages the film builders use (ubuntu-22.04 images have no numpy, and its pip has no --break-system-packages)
+        run: python3 -m pip install --quiet --retries 4 numpy scipy pillow
+      - id: b
+        name: Build the edit and the mix plan on the voice
+        run: |
+          set -euo pipefail
+          cp -r "private/${{ inputs.project_path }}" film
+          cd film
+          V2=""; for d in $(ls -d "$RUNNER_TEMP"/voice[0-9]* 2>/dev/null | sort -V); do V2="$V2 $d"; done; [ -n "$V2" ] && V2="--voice2$V2"
+          python3 build_film.py --voice "$RUNNER_TEMP/voice" $V2 --pick "${{ inputs.pick }}"
+          echo "total=$(python3 -c "import json;print(json.load(open('assets/timeline.json'))['total'])")" >> "$GITHUB_OUTPUT"
+          echo "world_at=$(python3 -c "import json;print(json.load(open('assets/timeline.json'))['world_at'])")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: film-${{ inputs.label }}
+          path: film
+          retention-days: 1
+          include-hidden-files: true
+  stills:
+    needs: build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: film-${{ inputs.label }}
+          path: film
+      - name: Runtime (Node 22, openfilm 0.2.5 patched, Pillow)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-darwin-arm64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/node-v22.12.0-darwin-arm64/bin:$PATH"
+          echo "$RUNNER_TEMP/node-v22.12.0-darwin-arm64/bin" >> "$GITHUB_PATH"
+          npm install --prefix "$RUNNER_TEMP/of" openfilm@0.2.5 --no-audit --no-fund --loglevel=error
+          python3 - <<'PY'
+          import os
+          R = os.environ["RUNNER_TEMP"] + "/of/node_modules/openfilm/src/"
+          def sub(f, a, b):
+              t = open(R + f).read(); assert a in t, (f, a); open(R + f, "w").write(t.replace(a, b))
+          sub("host.mjs", "timeoutMs = 60_000 } = {}) {", "timeoutMs = Number(process.env.OF_FRAME_MS || 60000) } = {}) {")
+          sub("host.mjs", "const CAPTURE_MS = 30_000;", "const CAPTURE_MS = Number(process.env.OF_CAPTURE_MS || 30000);")
+          sub("host.mjs", "waitMs = 10_000, readyMs = READY_MS", "waitMs = Number(process.env.OF_WAIT_MS || 10000), readyMs = READY_MS")
+          sub("host.mjs", "const READY_MS = 60_000;", "const READY_MS = Number(process.env.OF_READY_MS || 60000);")
+          sub("timeline.mjs", "performance.now() - t0 > 10000) throw new Error(`${c.row.src}: window.film", "performance.now() - t0 > 120000) throw new Error(`${c.row.src}: window.film")
+          sub("host.mjs", "...extra];", "...extra, ...(process.env.OF_EXTRA_ARGS ? process.env.OF_EXTRA_ARGS.split(' ') : [])];")
+          print("patched openfilm")
+          PY
+          node "$RUNNER_TEMP/of/node_modules/playwright-core/cli.js" install chromium-headless-shell 2>&1 | tail -2
+          python3 -c "import PIL" 2>/dev/null || python3 -m pip install --quiet pillow 2>/dev/null || python3 -m pip install --quiet --break-system-packages pillow
+          python3 -c "import PIL; print('pillow', PIL.__version__)"
+      - name: Draw the stills (one macOS job, final settings)
+        run: |
+          set -euo pipefail
+          mkdir -p stills
+          cat > "$RUNNER_TEMP/stills.mjs" <<JS
+          import { open } from '$RUNNER_TEMP/of/node_modules/openfilm/src/shared.mjs';
+          import { FilmPage } from '$RUNNER_TEMP/of/node_modules/openfilm/src/host.mjs';
+          import { writeFileSync } from 'node:fs';
+          const [dir, scale, timesArg, outDir] = process.argv.slice(2);
+          const times = timesArg.split(',').map(Number);
+          const probe = await open(dir);
+          const { site, entry, browser } = probe;
+          await probe.film.close();
+          const film = await FilmPage.open(browser, site.url, entry, { scale: Number(scale) });
+          const BAD = /WebGLProgram: Shader Error|CONTEXT_LOST|[Cc]ontext [Ll]ost|GL broken/;
+          const t0 = Date.now(); let n = 0;
+          // the first picture of a tab is a little off (openfilm draws and drops two before every part): same here
+          for (const q of [Math.max(0, times[0] - 2 / 60), Math.max(0, times[0] - 1 / 60)]) { await film.seek(q); await film.capture({ format: 'png' }); }
+          for (const t of times) {
+            await film.seek(t);
+            const buf = await film.capture({ format: 'png' });
+            writeFileSync(outDir + '/t' + t.toFixed(3).padStart(7, '0') + '.png', buf);
+            n++;
+          }
+          const bad = film.problems.filter((p) => BAD.test(p.message));
+          console.log('STILLS ' + n + ' frames in ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s, ' + film.problems.length + ' page problems, ' + bad.length + ' GL failures');
+          for (const p of film.problems.slice(0, 40)) console.log('PROBLEM ' + p.kind + ': ' + String(p.message).split('\\n')[0].slice(0, 220));
+          await film.close(); await probe.close();
+          process.exit(bad.length ? 3 : 0);
+          JS
+          read -r TIMES < <(python3 - <<'PY'
+          import json
+          tl = json.load(open('film/assets/timeline.json')); T = float(tl['total'])
+          x = '${{ inputs.times }}'.strip()
+          if x: ts = [float(v) for v in x.split(',')]
+          else:
+              a = float('${{ inputs.from }}' or 0); b = float('${{ inputs.to }}' or (T - 1/60)); st = float('${{ inputs.step }}')
+              ts = []; v = a
+              while v <= b + 1e-6: ts.append(v); v += st
+          ts = [min(max(0.0, round(v * 60) / 60), T - 1/60) for v in ts]
+          print(','.join('%.4f' % v for v in ts))
+          PY
+          )
+          echo "times: $TIMES"
+          export OF_FRAME_MS=900000 OF_CAPTURE_MS=300000 OF_WAIT_MS=90000 OF_READY_MS=180000
+          ok=0
+          for try in 1 2 3; do
+            rm -f stills/t*.png
+            S0=$(date +%s)
+            set +e; node "$RUNNER_TEMP/stills.mjs" film "${{ inputs.scale }}" "$TIMES" stills > stills.log 2>&1; rc=$?; set -e
+            tail -3 stills.log | cut -c1-240
+            if [ $rc = 0 ]; then ok=1; break; fi
+            if [ $rc = 3 ] && [ "${{ inputs.gl_guard }}" = yes ]; then echo "attempt $try: the page logged a GL failure (every later frame would be white): drawing again in a fresh browser"; grep -E "^PROBLEM" stills.log | head -8 | cut -c1-240; cp stills.log glfail_$try.log; continue; fi
+            if [ $rc = 3 ]; then ok=1; break; fi
+            echo "attempt $try failed (exit $rc) after $(( $(date +%s) - S0 )) s"; sleep 5
+          done
+          [ "$ok" = 1 ] || { echo "no clean attempt"; exit 1; }
+          ls stills | wc -l
+      - name: Contact sheets and 1080 px JPGs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, os, json
+          from PIL import Image, ImageDraw
+          fs = sorted(glob.glob('stills/t*.png'))
+          os.makedirs('out', exist_ok=True)
+          W, H, COLS, ROWS = 270, 480, 10, 4
+          tiles = []
+          for f in fs:
+              t = float(os.path.basename(f)[1:-4])
+              im = Image.open(f).convert('RGB')
+              im.resize((1080, int(1080 * im.size[1] / im.size[0])), Image.LANCZOS).save('out/t%07.3f.jpg' % t, quality=90)
+              tiles.append((t, im.resize((W, H), Image.LANCZOS)))
+          per = COLS * ROWS
+          for p in range(0, len(tiles), per):
+              sheet = Image.new('RGB', (W * COLS, H * ROWS), 'black')
+              for k, (t, tile) in enumerate(tiles[p:p + per]):
+                  d = ImageDraw.Draw(tile); d.rectangle([0, 0, 54, 14], fill='black'); d.text((3, 2), '%.2fs' % t, fill='white')
+                  sheet.paste(tile, ((k % COLS) * W, (k // COLS) * H))
+              sheet.save('out/sheet%d.jpg' % (p // per + 1), quality=88)
+          # a white or near-white still is flagged (mean luma above 235)
+          flags = []
+          for f in fs:
+              im = Image.open(f).convert('L').resize((135, 240))
+              m = sum(im.getdata()) / (135 * 240)
+              if m > 235: flags.append((os.path.basename(f), round(m, 1)))
+          json.dump({'stills': len(fs), 'near_white': flags}, open('out/summary.json', 'w'))
+          print('sheets', (len(tiles) + per - 1) // per, 'stills', len(fs), 'near-white', flags)
+          PY
+          cp stills.log out/stills.log; cp glfail_*.log out/ 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: stills-${{ inputs.label }}
+          path: out
+          retention-days: 3
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: stills-png-${{ inputs.label }}
+          path: stills
+          retention-days: 2
+          if-no-files-found: ignore
