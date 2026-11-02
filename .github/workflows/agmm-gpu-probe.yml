@@ -16,6 +16,7 @@ on:
       fps: { description: frames per second, required: false, default: '30' }
       workers: { description: 'browsers', required: false, default: '1' }
       pair_fps: { description: 'if set (e.g. 60 with fps 30): every span is ALSO rendered at this rate over the same seconds, and every frame of the pair that lands on a frame of the main render is compared (md5) with it: proves film time maps identically at both rates', required: false, default: '' }
+      repeat: { description: 'yes = render every span a second time at the main rate and report md5 equality and PSNR (determinism of the renderer on this runner)', required: false, default: 'no' }
       keep_video: { description: 'yes = upload the lossless spans (1 day) and compare against ubuntu-22.04', required: false, default: 'yes' }
 permissions:
   contents: read
@@ -137,6 +138,12 @@ jobs:
             echo "=== span $i: $S - $E ($N frames at $FPS fps, scale ${{ inputs.scale }}, ${{ matrix.runner }})"
             node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" out/span$i.mp4 2>&1 | tee -a timing.txt | tail -6
             ffmpeg -nostdin -v error -i out/span$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $1","$2","$6}' > out/span$i.md5
+            if [ "${{ inputs.repeat }}" = yes ]; then
+              node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "$FPS" out/rep$i.mp4 2>&1 | tee -a timing.txt | tail -3
+              ffmpeg -nostdin -v error -i out/rep$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $6}' > out/repmd5_$i.md5
+              ffmpeg -nostdin -v error -i out/span$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $6}' > out/mainmd5_$i.md5
+              echo "REPEAT span$i identical frames: $(paste out/repmd5_$i.md5 out/mainmd5_$i.md5 | awk '$1==$2' | wc -l) of $(wc -l < out/mainmd5_$i.md5); psnr_y: $(ffmpeg -nostdin -v info -i out/span$i.mp4 -i out/rep$i.mp4 -lavfi psnr -f null - 2>&1 | grep -o 'y:[0-9.a-z]*' | head -1)" | tee -a pairs.txt
+            fi
             if [ -n "${{ inputs.pair_fps }}" ]; then
               P=${{ inputs.pair_fps }}; NP=$(python3 -c "print(int(round($N*$P/$FPS)))")
               node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "$P" out/pair$i.mp4 2>&1 | tee -a timing.txt | tail -3
@@ -153,6 +160,7 @@ jobs:
                   n += 1; same += (b[int(round(j))] == h)
           print('PAIR span%s: main %d frames at %g fps, pair %d frames at %g fps, %d comparable frames, %d identical' % (i, len(a), f, len(b), p, n, same))
           PY
+          echo "PAIRPSNR span$i: $(ffmpeg -nostdin -v info -i out/span$i.mp4 -i out/pair$i.mp4 -lavfi "[1:v]select='not(mod(n\,$((P/FPS))))',setpts=N/($FPS*TB)[p];[0:v][p]psnr" -f null - 2>&1 | grep -o 'y:[0-9.a-z]*' | head -1)" | tee -a pairs.txt
             fi
             i=$((i+1))
           done
