@@ -1,0 +1,79 @@
+name: AGMM hailmary kit look
+run-name: AGMM kit look ${{ inputs.label }}
+# V7 human kit check (2 Nov 2026): loads a film folder's room.html in headless Chromium on the runner, seeks to the given times, saves a PNG per time and a contact sheet.
+# Nothing renders on the Mac; no media is committed. Optional openfilm render of a span (render_span="a-b") at scale 1 for the real pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      private_commit: { description: 40-hex commit of agmm-video-render, required: true }
+      project_path: { description: film folder inside that commit, required: true }
+      label: { description: short label, required: true }
+      times: { description: 'seconds to seek to, space separated', required: true }
+      cols: { description: sheet columns, required: false, default: '8' }
+      cell: { description: sheet cell width px, required: false, default: '270' }
+      render_span: { description: 'optional openfilm render span a-b seconds (scale 1, 30 fps)', required: false, default: '' }
+permissions:
+  contents: read
+concurrency:
+  group: agmm-kitlook-${{ inputs.label }}
+  cancel-in-progress: false
+jobs:
+  look:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Fetch the film folder (read-only deploy key)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+      - name: Runtime (Node 22, ffmpeg, Pillow, openfilm 0.2.5, Chromium headless shell)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/node-v22.12.0-linux-x64/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/node-v22.12.0-linux-x64/bin:$PATH"
+          for n in 1 2 3 4; do curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o "$RUNNER_TEMP/ff.tar.xz" && tar -xJf "$RUNNER_TEMP/ff.tar.xz" -C "$RUNNER_TEMP" && break; sleep 15; done
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --quiet --retries 4 pillow
+          npm install --prefix "$RUNNER_TEMP/of" openfilm@0.2.5 --no-audit --no-fund --loglevel=error
+          node "$RUNNER_TEMP/of/node_modules/playwright-core/cli.js" install chromium-headless-shell 2>&1 | tail -2
+      - name: Fetch assets, load the page, seek, screenshot
+        env:
+          KIT_TIMES: ${{ inputs.times }}
+        run: |
+          set -uo pipefail
+          export PATH="$RUNNER_TEMP/node-v22.12.0-linux-x64/bin:$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin:$PATH"
+          export OF_DIR="$RUNNER_TEMP/of"
+          cp -r "private/${{ inputs.project_path }}" film; mkdir -p qa; cd film
+          python3 fetch_3d.py 2>&1 | tail -30
+          node kitprobe.mjs ../qa 2>&1 | tee ../qa/probe.txt | tail -40
+          python3 kitsheet.py ../qa "${{ inputs.cols }}" "${{ inputs.cell }}"
+          ls ../qa | head -80
+      - name: openfilm render of a span (optional)
+        if: inputs.render_span != ''
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          export PATH="$RUNNER_TEMP/node-v22.12.0-linux-x64/bin:$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin:$PATH"
+          cd film
+          cat > "$RUNNER_TEMP/r.mjs" <<JS
+          import { render } from '$RUNNER_TEMP/of/node_modules/openfilm/src/render.mjs';
+          const r = await render(['.', '${{ inputs.render_span }}'], { scale: 1, fps: 30, out: '../qa/span.mp4', silent: true });
+          console.log(r.lines.join('\n'));
+          JS
+          OF_FRAME_MS=300000 timeout 1500 node "$RUNNER_TEMP/r.mjs" 2>&1 | tail -30
+          ls -la ../qa/span.mp4 && ffmpeg -nostdin -y -loglevel error -i ../qa/span.mp4 -vf "fps=6,scale=216:-1,tile=8x4" -frames:v 1 ../qa/span_sheet.jpg || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kitlook-${{ inputs.label }}
+          path: qa
+          retention-days: 3
