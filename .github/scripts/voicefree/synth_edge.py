@@ -92,10 +92,10 @@ def apply_alias(tk, names):
 
 
 # ---------------------------------------------------------------- edge-tts
-async def edge_once(text, voice, rate, pitch, mp3):
+async def edge_once(text, voice, rate, pitch, mp3, boundary="WordBoundary"):
     import edge_tts
     try:
-        comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
+        comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary=boundary)
     except TypeError:
         comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     words, sents, n_audio = [], [], 0
@@ -112,16 +112,18 @@ async def edge_once(text, voice, rate, pitch, mp3):
     return words, sents
 
 
-def edge_synth(text, voice, rate, pitch, mp3, tries=4):
+def edge_synth(text, voice, rate, pitch, mp3):
+    """returns (word events, sentence events, mode). 2 tries with WordBoundary, then 2 with SentenceBoundary (some voice/rate combinations refuse word boundaries)."""
     last = None
-    for i in range(tries):
+    for i, mode in enumerate(("WordBoundary", "WordBoundary", "SentenceBoundary", "SentenceBoundary")):
         try:
-            return asyncio.run(edge_once(text, voice, rate, pitch, mp3))
+            w, s = asyncio.run(edge_once(text, voice, rate, pitch, mp3, mode))
+            return w, s, mode
         except Exception as e:      # noqa: BLE001
             last = e
-            print("edge-tts attempt %d failed: %s" % (i + 1, repr(e)[:160]), flush=True)
-            time.sleep(2 + 3 * i)
-    raise RuntimeError("edge-tts failed after %d tries: %s" % (tries, repr(last)[:200]))
+            print("edge-tts attempt %d (%s, %s %s) failed: %s" % (i + 1, mode, voice, rate, repr(e)[:120]), flush=True)
+            time.sleep(2 + 2 * i)
+    raise RuntimeError("edge-tts failed: %s" % repr(last)[:200])
 
 
 # ---------------------------------------------------------------- audio
@@ -246,7 +248,7 @@ def main():
     ver = getattr(edge_tts, "__version__", "?")
     names = {k: v for k, v in (req.get("names") or {}).items()}
     base = {"voice": req.get("voice", "en-GB-RyanNeural"), "rate": req.get("rate", "+0%"), "pitch": req.get("pitch", "+0Hz")}
-    results, t_all = [], time.time()
+    results, failed, t_all = [], [], time.time()
     for pi, para in enumerate(req["paragraphs"], 1):
         key, text = para["key"], para["text"].strip()
         variants = para.get("variants") or req.get("variants") or [{}]
@@ -258,7 +260,14 @@ def main():
             stem = "%s.t%d" % (key, k)
             t0 = time.time()
             mp3 = os.path.join(tmp, stem + ".mp3")
-            ev, sents = edge_synth(v.get("say", spoken), v["voice"], v["rate"], v["pitch"], mp3)
+            try:
+                ev, sents, bmode = edge_synth(v.get("say", spoken), v["voice"], v["rate"], v["pitch"], mp3)
+            except Exception as e:      # noqa: BLE001
+                row = {"key": key, "take": k, "voice": v["voice"], "rate": v["rate"], "pitch": v["pitch"], "gate_pass": False, "asr_match": False, "error": repr(e)[:160]}
+                print(json.dumps(row), flush=True)
+                json.dump(row, open(os.path.join(a.pub, stem + ".gate.json"), "w"))
+                failed.append(row)          # not in results.json: the film's load_takes needs a receipt for every row
+                continue
             raw = to_wav(mp3, os.path.join(tmp, stem + ".raw.wav"))
             y, shift = trim_pad(raw)
             y, lufs0, limited = loudnorm(y)
@@ -296,7 +305,7 @@ def main():
                        "gate": {"pass": gate_pass, "large_v3": gl, "medium_en": gm, "prob_min_required": PROB_MIN,
                                 "word_probs": [[w["text"], w["probability"]] for w in wl], "lowest_word": lo, "lowest_prob": gl["min_prob"]},
                        "timing": {"source": timing_source, "shift_s": round(shift, 4), "whisper_minus_edge_start_median_s": (round(statistics.median(offs), 3) if offs else None),
-                                  "whisper_minus_edge_start_maxabs_s": (round(max(abs(x) for x in offs), 3) if offs else None), "n_boundary_words": len(ev)},
+                                  "whisper_minus_edge_start_maxabs_s": (round(max(abs(x) for x in offs), 3) if offs else None), "n_boundary_words": len(ev), "boundary_mode": bmode},
                        "loudness": {"lufs_before": lufs0, "target": LUFS_TARGET, "peak_limited": limited},
                        "spot_fail": [], "tempo_applied": None, "seed": None, "render_seconds": round(time.time() - t0, 1),
                        "run": {"id": os.environ.get("GITHUB_RUN_ID"), "sha": os.environ.get("GITHUB_SHA")}}
@@ -304,15 +313,15 @@ def main():
             row = {"key": key, "take": k, "dur_s": dur, "wpm_native": wpm, "span_wpm": swpm, "asr_match": gate_pass, "render_s": round(time.time() - t0, 1), "sim_ref": {},
                    "chunks": 1, "native_ratio": None, "sim_baseline": None, "voice": v["voice"], "rate": v["rate"], "pitch": v["pitch"],
                    "gate_pass": gate_pass, "large_match": gl["match"], "medium_match": gm["match"], "min_prob": gl["min_prob"], "min_word": lo,
-                   "n_below_070": gl["n_words_below"], "timing_source": timing_source}
+                   "n_below_070": gl["n_words_below"], "timing_source": timing_source, "boundary_mode": bmode}
             results.append(row)
             # public log: numbers only
-            print(json.dumps({k2: row[k2] for k2 in ("key", "take", "voice", "rate", "dur_s", "wpm_native", "gate_pass", "large_match", "medium_match", "min_prob", "n_below_070", "timing_source")}), flush=True)
-            json.dump({k2: row[k2] for k2 in ("key", "take", "voice", "rate", "pitch", "dur_s", "wpm_native", "span_wpm", "gate_pass", "large_match", "medium_match", "min_prob", "n_below_070", "timing_source")}
+            print(json.dumps({k2: row[k2] for k2 in ("key", "take", "voice", "rate", "dur_s", "wpm_native", "gate_pass", "large_match", "medium_match", "min_prob", "n_below_070", "timing_source", "boundary_mode")}), flush=True)
+            json.dump({k2: row[k2] for k2 in ("key", "take", "voice", "rate", "pitch", "dur_s", "wpm_native", "span_wpm", "gate_pass", "large_match", "medium_match", "min_prob", "n_below_070", "timing_source", "boundary_mode")}
                       | {"n_expected": gl["n_expected"], "n_heard_large": gl["n_heard"], "n_heard_medium": gm["n_heard"], "lufs_before": lufs0},
                       open(os.path.join(a.pub, stem + ".gate.json"), "w"))
     json.dump({"label": req.get("label"), "id": req.get("id"), "engine": "edge-tts %s" % ver, "engine_version": ver, "params": {}, "reference_sha256": None, "model_load_s": None,
-               "total_s": round(time.time() - t_all, 1), "takes": results}, open(os.path.join(a.out, "results.json"), "w"), indent=1)
+               "total_s": round(time.time() - t_all, 1), "takes": results, "failed": failed}, open(os.path.join(a.out, "results.json"), "w"), indent=1)
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     print("done", len(results), "takes in", round(time.time() - t_all), "s", flush=True)
