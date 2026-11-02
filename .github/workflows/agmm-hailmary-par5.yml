@@ -47,6 +47,7 @@ jobs:
       total: ${{ steps.b.outputs.total }}
       world_at: ${{ steps.b.outputs.world_at }}
       segs: ${{ steps.b.outputs.segs }}
+      nseg: ${{ steps.b.outputs.nseg }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -109,6 +110,7 @@ jobs:
           rn = '${{ inputs.runner }}'
           # mixed = alternate macos-14 and macos-15: their frames are md5-identical (proved 2 Nov), so a film may use both, and two label queues pick up faster than one
           lab = lambda i: (['macos-14', 'macos-15'][i % 2] if rn == 'mixed' else rn)
+          print('nseg=' + str(n))
           print('segs=' + json.dumps([{'seg': i, 'r': lab(i)} for i in range(n)], separators=(',', ':')))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -138,7 +140,7 @@ jobs:
           read A B < <(python3 -c "
           import json; tl=json.load(open('assets/timeline.json')); A=tl['a']; T=tl['total']; W=tl['world_at']
           R=tl.get('choreo',{}).get('t',{}).get('reveal_end',W+1.2)
-          N=len(json.loads('${{ needs.build.outputs.segs }}')); i=${{ matrix.item.seg }}
+          N=${{ needs.build.outputs.nseg }}; i=${{ matrix.item.seg }}
           fr=int(round(float('${{ inputs.fps }}'))); frames=int(round(T*fr))   # cut frames are counted at the render rate; segment edges are passed to openfilm as seconds
           # (SwiftShader model; on macOS the frame cost is nearly flat, see COSTFLAT below) measured on Actions, 4 vCPU, 1 worker (26 Oct): s/frame 1x -> 2x: crowd 12.4 -> 30.9, eye reveal (full-frame raymarch) 1.3 -> 6.5, Alfred 0.43 -> 1.65; opening taken as crowd/2.6
           SC=float('${{ inputs.scale }}'); hi=SC>=1.5
