@@ -17,6 +17,7 @@ on:
       workers: { description: 'browsers', required: false, default: '1' }
       pair_fps: { description: 'if set (e.g. 60 with fps 30): every span is ALSO rendered at this rate over the same seconds, and every frame of the pair that lands on a frame of the main render is compared (md5) with it: proves film time maps identically at both rates', required: false, default: '' }
       repeat: { description: 'yes = render every span a second time at the main rate and report md5 equality and PSNR (determinism of the renderer on this runner)', required: false, default: 'no' }
+      angle: { description: 'macOS only: ANGLE backend for --use-angle (default metal; try gl or swiftshader)', required: false, default: '' }
       keep_video: { description: 'yes = upload the lossless spans (1 day) and compare against ubuntu-22.04', required: false, default: 'yes' }
 permissions:
   contents: read
@@ -80,6 +81,7 @@ jobs:
           sub("timeline.mjs", "performance.now() - t0 > 10000) throw new Error(`${c.row.src}: window.film", "performance.now() - t0 > 120000) throw new Error(`${c.row.src}: window.film")
           # optional escape hatch for GPU experiments: OF_EXTRA_ARGS adds chromium switches (space separated) and OF_NO_METAL drops the darwin default --use-angle=metal
           sub("host.mjs", "...extra];", "...extra, ...(process.env.OF_EXTRA_ARGS ? process.env.OF_EXTRA_ARGS.split(' ') : [])];")
+          sub("host.mjs", "process.platform === 'darwin' ? await open(['--use-angle=metal'])", "process.platform === 'darwin' ? await open([process.env.OF_ANGLE ? '--use-angle=' + process.env.OF_ANGLE : '--use-angle=metal'])")
           print("patched")
           PY
           node --check "$RUNNER_TEMP/of/node_modules/openfilm/src/host.mjs"
@@ -104,6 +106,7 @@ jobs:
       - name: Render the spans, timing every frame
         env:
           OF_FRAME_MS: '900000'
+          OF_ANGLE: ${{ inputs.angle }}
           OF_CAPTURE_MS: '300000'
           OF_WAIT_MS: '90000'
           OF_READY_MS: '180000'
