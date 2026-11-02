@@ -98,7 +98,7 @@ jobs:
           OF_READY_MS: '240000'
           OF_EXTRA_ARGS: ${{ startsWith(matrix.leg.runner, 'macos') && '--disable-gpu-watchdog' || '' }}
         run: |
-          set -uo pipefail
+          set +e
           export PATH="$(ls -d $RUNNER_TEMP/node-v22*/bin | head -1):$PATH"
           mkdir -p out
           cat > "$RUNNER_TEMP/run.mjs" <<JS
@@ -134,7 +134,7 @@ jobs:
               TIMING=$(grep -E "^TIMING" $F.log | tail -1)
               if [ -f $F.mp4 ]; then
                 ffmpeg -nostdin -v error -i $F.mp4 -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -f null - | grep YAVG | awk -F= '{print $2}' > $F.luma
-                ffmpeg -nostdin -v error -y -i $F.mp4 -vf "select='eq(n,0)+eq(n,$((N-1)))',scale=360:-1" -vsync 0 ${F}_%d.png
+                ffmpeg -nostdin -v error -y -i $F.mp4 -vf "select='eq(n,0)+eq(n,$((N-1)))',scale=360:-1" -fps_mode passthrough ${F}_%d.png
                 LS=$(awk 'BEGIN{mn=999;mx=0} {n++; s+=$1; if($1<mn)mn=$1; if($1>mx)mx=$1; if($1>230)w++; if($1<12)b++} END {printf "frames=%d min=%.1f max=%.1f mean=%.1f white=%d black=%d", n, mn, mx, s/n, w, b}' $F.luma)
                 rm -f $F.mp4
               else LS="NO VIDEO"; fi
