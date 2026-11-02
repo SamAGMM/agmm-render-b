@@ -31,6 +31,7 @@ on:
       rerender_from: { description: 'with reuse_picture_run: re-render segments ending after this second, reuse the rest (empty = reuse all)', required: false, default: '' }
       workers: { description: 'browsers per segment (openfilm --workers). 1 = safe for heavy 3D pages (2 browsers loading the hdr/glb at once abort each other); empty = openfilm default', required: false, default: '1' }
       only_segs: { description: 'proof mode: comma-separated segment indexes to render (e.g. 19,20); every other segment is skipped and assemble does not run', required: false, default: '' }
+      gl_guard: { description: 'yes (default) = a segment whose page logged a WebGL shader link failure or lost context is rendered again in a fresh browser (up to 4 attempts) and fails if it never comes out clean; a failed link or lost context turns every later frame white while openfilm still exits 0 (seen 2 Nov on H12, H15, H19). no = accept the log as is', required: false, default: 'yes' }
       frame_s: { description: 'per-frame limit in seconds (openfilm 0.2.5 hardcodes 60 s; this patches it)', required: false, default: '900' }
 permissions:
   contents: read
@@ -226,6 +227,8 @@ jobs:
           sub("host.mjs", "waitMs = 10_000, readyMs = READY_MS", "waitMs = Number(process.env.OF_WAIT_MS || 10000), readyMs = READY_MS")
           sub("host.mjs", "const READY_MS = 60_000;", "const READY_MS = Number(process.env.OF_READY_MS || 60000);")
           sub("timeline.mjs", "performance.now() - t0 > 10000) throw new Error(`${c.row.src}: window.film", "performance.now() - t0 > 120000) throw new Error(`${c.row.src}: window.film")
+          # extra Chromium switches from OF_EXTRA_ARGS (space separated), appended to openfilm's own
+          sub("host.mjs", "...extra];", "...extra, ...(process.env.OF_EXTRA_ARGS ? process.env.OF_EXTRA_ARGS.split(' ') : [])];")
           print("patched openfilm")
           PY
           node --check "$RUNNER_TEMP/of/node_modules/openfilm/src/host.mjs"
@@ -254,13 +257,22 @@ jobs:
             # page loads can flake (an aborted asset fetch, "window.film did not appear"): retry up to 3 times
             ok=0
             export OF_FRAME_MS=$(( ${{ inputs.frame_s }} * 1000 )) OF_CAPTURE_MS=300000 OF_WAIT_MS=90000 OF_READY_MS=180000
-            for try in 1 2 3; do
+            export OF_EXTRA_ARGS="--disable-gpu-watchdog"
+            for try in 1 2 3 4; do
               S0=$(date +%s)
-              if node "$RUNNER_TEMP/run5.mjs" . "$A" "$B" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" "${{ inputs.preset }}" "../seg_${{ matrix.item.seg }}.mp4" > render.log 2>&1; then echo "segment ${{ matrix.item.seg }} ($A-$B s, ${{ inputs.fps }} fps, scale ${{ inputs.scale }}, ${{ inputs.runner }}) rendered in $(( $(date +%s) - S0 )) s"; ok=1; break; fi
+              if node "$RUNNER_TEMP/run5.mjs" . "$A" "$B" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" "${{ inputs.preset }}" "../seg_${{ matrix.item.seg }}.mp4" > render.log 2>&1; then
+                if [ "${{ inputs.gl_guard }}" = yes ] && grep -qE "WebGLProgram: Shader Error|CONTEXT_LOST|[Cc]ontext [Ll]ost|GL broken" render.log; then
+                  echo "attempt $try rendered in $(( $(date +%s) - S0 )) s but the page logged GL failures (every later frame would be white): rendering again in a fresh browser"
+                  grep -E "✗ page|WebGLProgram|Material Type" render.log | head -12
+                  cp render.log "../glfail_${{ matrix.item.seg }}_$try.txt"
+                  sleep 5; continue
+                fi
+                echo "segment ${{ matrix.item.seg }} ($A-$B s, ${{ inputs.fps }} fps, scale ${{ inputs.scale }}, ${{ matrix.item.r }}) rendered in $(( $(date +%s) - S0 )) s on attempt $try"; ok=1; break
+              fi
               echo "attempt $try failed after $(( $(date +%s) - S0 )) s:"
               echo "attempt $try failed:"; tail -5 render.log; sleep 8
             done
-            tail -6 render.log
+            tail -6 render.log; grep -E "✗ page" render.log | head -5 || true
             cp render.log "../timing_${{ matrix.item.seg }}.txt"
             [ "$ok" = 1 ] || exit 1
           fi
@@ -271,6 +283,7 @@ jobs:
           path: |
             seg_*.mp4
             timing_*.txt
+            glfail_*.txt
           retention-days: 1
           if-no-files-found: ignore
   assemble:
