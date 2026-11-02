@@ -143,6 +143,8 @@ jobs:
             echo "=== span $i: $S - $E ($N frames at $FPS fps, scale ${{ inputs.scale }}, ${{ matrix.runner }})"
             node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "${{ inputs.fps }}" out/span$i.mp4 2>&1 | tee -a timing.txt | tail -6
             ffmpeg -nostdin -v error -i out/span$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $1","$2","$6}' > out/span$i.md5
+            ffmpeg -nostdin -v error -i out/span$i.mp4 -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -f null - | grep YAVG | awk -F= '{print $2}' > out/luma$i.txt
+            awk -v s="$S" -v f="$FPS" '{n++; if($1>230){w++; if(!fw) fw=n-1} if(min==""||$1<min)min=$1; if($1>max)max=$1} END {printf "LUMA span%s from %ss: frames %d, min %.1f max %.1f, frames above 230 (white): %d, first white frame index %s\n", "'$i'", s, n, min, max, w+0, (fw==""?"none":fw)}' out/luma$i.txt | tee -a luma_summary.txt
             if [ "${{ inputs.repeat }}" = yes ]; then
               node "$RUNNER_TEMP/run.mjs" film "$S" "$E" "${{ inputs.scale }}" "${{ inputs.workers }}" "$FPS" out/rep$i.mp4 2>&1 | tee -a timing.txt | tail -3
               ffmpeg -nostdin -v error -i out/rep$i.mp4 -f framemd5 - | grep -v '^#' | awk -F, '{print $6}' > out/repmd5_$i.md5
@@ -178,6 +180,8 @@ jobs:
             gl.txt
             timing.txt
             pairs.txt
+            luma_summary.txt
+            out/luma*.txt
             out/*.md5
           retention-days: 3
           if-no-files-found: ignore
