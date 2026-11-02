@@ -1,0 +1,203 @@
+name: AGMM kit v7 render test
+run-name: AGMM kit v7 test ${{ inputs.label }}
+# Hail Mary V7 render kit stability test (3 Nov 2026), pool B only. Renders a heavy 3D test page (kit-v7/rendertest/kittest.html) once per kit variant on each leg
+# (macOS hardware GL at scale 2, Linux SwiftShader at scale 1), counts shader-link failures in the render log, measures luma per frame (white/black), records s/frame, and
+# uploads a labelled contact sheet. The film comes from the PRIVATE repo via the read-only deploy key. Nothing renders on the Mac.
+on:
+  workflow_dispatch:
+    inputs:
+      private_commit: { description: 40-hex commit of agmm-video-render holding kit-v7, required: true }
+      project_path: { description: 'test film folder', required: false, default: hailmary/kit-v7/rendertest }
+      label: { description: short label, required: true }
+      legs: { description: 'JSON list of legs {name,runner,scale}', required: false, default: '[{"name":"mac-a","runner":"macos-14","scale":2},{"name":"mac-b","runner":"macos-14","scale":2},{"name":"lin","runner":"ubuntu-22.04","scale":1}]' }
+      variants: { description: 'JSON list of "name|kitflags"', required: false, default: '["bare|shadow:off,env:0,grain:0,vig:0","default|","agx|tone:agx","vsm|shadow:vsm","ao|ao:1","dof|dof:1","bloom|bloom:1","all|ao:1,dof:1,bloom:1","all8|ao:1,dof:1,bloom:1,prec:byte"]' }
+      nframes: { description: frames per span, required: false, default: '10' }
+      spans: { description: 'span start seconds, space separated', required: false, default: '1.0 3.6' }
+      fps: { description: fps, required: false, default: '60' }
+permissions:
+  contents: read
+  actions: read
+jobs:
+  prep:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+            hailmary/kit-v7
+      - name: Fetch Poly Haven assets (as the build job of a real film does)
+        run: |
+          set -euo pipefail
+          cp -r "private/${{ inputs.project_path }}" film
+          cd film
+          python3 fetch_polyhaven.py hdri:kloofendal_48d_partly_cloudy_puresky:2k tex:laminate_floor_02:2k tex:plastered_wall_04:2k \
+            model:metal_office_desk:2k model:classic_laptop:2k model:vintage_electric_kettle:2k model:wall_clock:2k model:office_notepads:2k model:potted_plant_04:2k model:metal_trash_can:2k model:modern_arm_chair_01:2k
+          du -sh assets/3d/ph; find assets/3d/ph -maxdepth 3 | head -40
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kitfilm-${{ inputs.label }}
+          path: film
+          retention-days: 1
+  leg:
+    needs: prep
+    runs-on: ${{ matrix.leg.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(inputs.legs) }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: kitfilm-${{ inputs.label }}
+          path: film
+      - name: Runtime (ffmpeg, Node 22, openfilm 0.2.5 patched)
+        run: |
+          set -euo pipefail
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64)
+              curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-darwin-arm64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+              echo "$RUNNER_TEMP/node-v22.12.0-darwin-arm64/bin" >> "$GITHUB_PATH"
+              for n in 1 2 3; do brew install --quiet ffmpeg && break; sleep 15; done ;;
+            Linux-x86_64)
+              for n in 1 2 3 4 5 6; do curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o "$RUNNER_TEMP/ff.tar.xz" && tar -xJf "$RUNNER_TEMP/ff.tar.xz" -C "$RUNNER_TEMP" && break; sleep 20; done
+              echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+              curl -fsSL --retry 4 https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+              echo "$RUNNER_TEMP/node-v22.12.0-linux-x64/bin" >> "$GITHUB_PATH" ;;
+          esac
+          export PATH="$(ls -d $RUNNER_TEMP/node-v22*/bin | head -1):$PATH"
+          npm install --prefix "$RUNNER_TEMP/of" openfilm@0.2.5 --no-audit --no-fund --loglevel=error
+          python3 - <<'PY'
+          import os
+          R = os.environ["RUNNER_TEMP"] + "/of/node_modules/openfilm/src/"
+          def sub(f, a, b):
+              s = open(R + f).read(); assert a in s, (f, a); open(R + f, "w").write(s.replace(a, b))
+          sub("host.mjs", "timeoutMs = 60_000 } = {}) {", "timeoutMs = Number(process.env.OF_FRAME_MS || 60000) } = {}) {")
+          sub("host.mjs", "const CAPTURE_MS = 30_000;", "const CAPTURE_MS = Number(process.env.OF_CAPTURE_MS || 30000);")
+          sub("host.mjs", "waitMs = 10_000, readyMs = READY_MS", "waitMs = Number(process.env.OF_WAIT_MS || 10000), readyMs = READY_MS")
+          sub("host.mjs", "const READY_MS = 60_000;", "const READY_MS = Number(process.env.OF_READY_MS || 60000);")
+          sub("timeline.mjs", "performance.now() - t0 > 10000) throw new Error(`${c.row.src}: window.film", "performance.now() - t0 > 120000) throw new Error(`${c.row.src}: window.film")
+          sub("host.mjs", "...extra];", "...extra, ...(process.env.OF_EXTRA_ARGS ? process.env.OF_EXTRA_ARGS.split(' ') : [])];")
+          print("patched")
+          PY
+          node "$RUNNER_TEMP/of/node_modules/playwright-core/cli.js" install chromium-headless-shell 2>&1 | tail -2
+      - name: Render every variant, check for shader failures and white frames
+        env:
+          OF_FRAME_MS: '900000'
+          OF_CAPTURE_MS: '300000'
+          OF_WAIT_MS: '120000'
+          OF_READY_MS: '240000'
+          OF_EXTRA_ARGS: ${{ startsWith(matrix.leg.runner, 'macos') && '--disable-gpu-watchdog' || '' }}
+        run: |
+          set -uo pipefail
+          export PATH="$(ls -d $RUNNER_TEMP/node-v22*/bin | head -1):$PATH"
+          mkdir -p out
+          cat > "$RUNNER_TEMP/run.mjs" <<JS
+          import { render } from '$RUNNER_TEMP/of/node_modules/openfilm/src/render.mjs';
+          const [dir, a, b, scale, fps, out] = process.argv.slice(2);
+          const t0 = Date.now(); const stamps = [];
+          const r = await render([dir, a + '-' + b], { scale: Number(scale), fps: Number(fps), out, silent: true, workers: 1,
+            onProgress: () => stamps.push((Date.now() - t0) / 1000),
+            format: { video: ['-c:v', 'libx264', '-preset', 'ultrafast', '-qp', '0', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-color_range', 'tv'], pix: 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p' } });
+          console.log(r.lines.join('\n'));
+          const g = stamps.slice(1).map((v, i) => v - stamps[i]); const st = g.length ? g.reduce((x, y) => x + y, 0) / g.length : 0;
+          console.log('TIMING first_frame_s=' + (stamps[0] || 0).toFixed(1) + ' steady_s_per_frame=' + st.toFixed(3) + ' wall_s=' + ((Date.now() - t0) / 1000).toFixed(1));
+          JS
+          cat > "$RUNNER_TEMP/setflags.py" <<'PY'
+          import sys
+          s = open('film/film.html.tpl').read().replace('KITFLAGS', sys.argv[1]); open('film/film.html', 'w').write(s)
+          PY
+          cp film/film.html film/film.html.tpl
+          FPS=${{ inputs.fps }}; N=${{ inputs.nframes }}; SC=${{ matrix.leg.scale }}; LEG=${{ matrix.leg.name }}
+          echo '[]' > out/summary.json
+          echo '${{ inputs.variants }}' | python3 -c "import json,sys; [print(v) for v in json.load(sys.stdin)]" > "$RUNNER_TEMP/variants.txt"
+          while IFS= read -r V; do
+            NAME=${V%%|*}; FLAGS=${V#*|}
+            python3 "$RUNNER_TEMP/setflags.py" "$FLAGS"
+            echo "=== $LEG variant $NAME flags='$FLAGS'"
+            i=0
+            for S in ${{ inputs.spans }}; do
+              S=$(python3 -c "print(round(round($S*$FPS)/$FPS, 6))"); E=$(python3 -c "print(round($S + $N/$FPS, 4))")
+              F=out/${NAME}_s$i; rc=0; T0=$(date +%s)
+              ( cd film && node "$RUNNER_TEMP/run.mjs" . "$S" "$E" "$SC" "$FPS" "../$F.mp4" ) > $F.log 2>&1 || rc=$?
+              WALL=$(( $(date +%s) - T0 ))
+              SHERR=$(grep -cE "Shader Error|VALIDATE_STATUS|GL broken|[Cc]ontext [Ll]ost|CONTEXT_LOST" $F.log || true)
+              TIMING=$(grep -E "^TIMING" $F.log | tail -1)
+              if [ -f $F.mp4 ]; then
+                ffmpeg -nostdin -v error -i $F.mp4 -vf "signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -f null - | grep YAVG | awk -F= '{print $2}' > $F.luma
+                ffmpeg -nostdin -v error -y -i $F.mp4 -vf "select='eq(n,0)+eq(n,$((N-1)))',scale=360:-1" -vsync 0 ${F}_%d.png
+                LS=$(awk 'BEGIN{mn=999;mx=0} {n++; s+=$1; if($1<mn)mn=$1; if($1>mx)mx=$1; if($1>230)w++; if($1<12)b++} END {printf "frames=%d min=%.1f max=%.1f mean=%.1f white=%d black=%d", n, mn, mx, s/n, w, b}' $F.luma)
+                rm -f $F.mp4
+              else LS="NO VIDEO"; fi
+              echo "RESULT leg=$LEG variant=$NAME span=$i rc=$rc wall_s=$WALL shader_errors=$SHERR $TIMING $LS" | tee -a out/results.txt
+              grep -E "✗ page|WebGLProgram|Shader Error|kit|GL broken" $F.log | head -6 || true
+              i=$((i+1))
+            done
+          done < "$RUNNER_TEMP/variants.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kitleg-${{ inputs.label }}-${{ matrix.leg.name }}
+          path: |
+            out/*.png
+            out/*.log
+            out/*.luma
+            out/results.txt
+          retention-days: 3
+          if-no-files-found: ignore
+  report:
+    needs: leg
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: kitleg-${{ inputs.label }}-*
+          path: legs
+      - name: Sheet and verdict
+        run: |
+          set -uo pipefail
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          import glob, os, re, json
+          from PIL import Image, ImageDraw
+          rows = []
+          for f in sorted(glob.glob('legs/*/results.txt')):
+              for l in open(f):
+                  if l.startswith('RESULT'): rows.append(dict(kv.split('=', 1) for kv in l.split() if '=' in kv))
+          bad = [r for r in rows if r.get('rc') != '0' or r.get('shader_errors') != '0' or r.get('white') != '0' or r.get('black') != '0' or 'frames' not in r or r.get('NO') == 'VIDEO']
+          print('| leg | variant | span | rc | shader errors | first frame s | s/frame | luma min..max | white | black |')
+          print('|---|---|---|---|---|---|---|---|---|---|')
+          for r in rows: print('| %s | %s | %s | %s | %s | %s | %s | %s..%s | %s | %s |' % (r.get('leg'), r.get('variant'), r.get('span'), r.get('rc'), r.get('shader_errors'), r.get('first_frame_s'), r.get('steady_s_per_frame'), r.get('min'), r.get('max'), r.get('white'), r.get('black')))
+          print('RESULT rows', len(rows), 'bad', len(bad)); [print('BAD', json.dumps(b)) for b in bad]
+          # labelled sheet per leg: one row per variant, 4 thumbs (2 spans x first/last frame)
+          for leg in sorted(os.listdir('legs')):
+              d = 'legs/' + leg; names = sorted({re.sub(r'_s\d_\d\.png$', '', os.path.basename(p)) for p in glob.glob(d + '/*_s*_*.png')})
+              if not names: continue
+              TW = 270; TH = 480; pad = 4; lab = 22
+              sheet = Image.new('RGB', (4 * (TW + pad) + 110, len(names) * (TH + lab + pad)), (20, 20, 20)); dr = ImageDraw.Draw(sheet)
+              for ri, n in enumerate(names):
+                  y = ri * (TH + lab + pad); dr.text((4, y + 4), n, fill=(255, 255, 255))
+                  for ci, p in enumerate(sorted(glob.glob('%s/%s_s*_*.png' % (d, n)))[:4]):
+                      im = Image.open(p).convert('RGB').resize((TW, TH)); sheet.paste(im, (110 + ci * (TW + pad), y + lab))
+              sheet.save('sheet_%s.png' % leg.replace('kitleg-', '')); print('sheet', leg, len(names), 'variants')
+          PY
+          ls -la sheet_*.png | cat
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          print('see the log of this step for the table')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kitsheet-${{ inputs.label }}
+          path: sheet_*.png
+          retention-days: 3
