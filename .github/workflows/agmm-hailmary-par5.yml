@@ -144,10 +144,10 @@ jobs:
           fr=int(round(float('${{ inputs.fps }}'))); frames=int(round(T*fr))   # cut frames are counted at the render rate; segment edges are passed to openfilm as seconds
           # (SwiftShader model; on macOS the frame cost is nearly flat, see COSTFLAT below) measured on Actions, 4 vCPU, 1 worker (26 Oct): s/frame 1x -> 2x: crowd 12.4 -> 30.9, eye reveal (full-frame raymarch) 1.3 -> 6.5, Alfred 0.43 -> 1.65; opening taken as crowd/2.6
           SC=float('${{ inputs.scale }}'); hi=SC>=1.5
-          def cost(t): return 1.0 if t<A['ten'] else (2.6 if t<W else ((0.55 if hi else 0.27) if t<R else (0.14 if hi else 0.09)))
+          def cost(t): return 1.0 if t<A.get('ten',0) else (2.6 if t<W else ((0.55 if hi else 0.27) if t<R else (0.14 if hi else 0.09)))
           if '${{ inputs.runner }}' != 'ubuntu-22.04':
               # COSTFLAT: hardware GL, measured H05 scale 2 on macos-14: crowd 0.31 s/frame, reveal 0.16, so the spread is 2x not 14x; the x264 encode (same for every frame) dominates
-              def cost(t): return 1.0 if t<A['ten'] else (1.0 if t<W else (0.6 if t<R else 0.5))
+              def cost(t): return 1.0 if t<A.get('ten',0) else (1.0 if t<W else (0.6 if t<R else 0.5))
           cs=[cost(f/fr) for f in range(frames)]; tot=sum(cs); cuts=[0]; acc=0.0
           for f,c in enumerate(cs):
               acc+=c
