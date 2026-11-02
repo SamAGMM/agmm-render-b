@@ -85,6 +85,33 @@ jobs:
           name: edgegate-${{ inputs.label }}
           path: ${{ runner.temp }}/pub-out
           retention-days: 7
+      - name: Encrypted debug report (texts of every take, for the operator only)
+        if: always()
+        env:
+          EDGE_REPORT_PASS: ${{ secrets.EDGE_REPORT_PASS }}
+        run: |
+          set -euo pipefail
+          test -n "$EDGE_REPORT_PASS" || exit 0
+          python - <<'PY'
+          import glob, json, os
+          o = os.environ["RUNNER_TEMP"]
+          rows = []
+          for f in sorted(glob.glob(o + "/synth-out/*.receipt.json")):
+              r = json.load(open(f)); g = r["gate"]
+              rows.append({"take": os.path.basename(f).replace(".receipt.json", ""), "voice": r["voice"], "rate": r["rate"], "pass": g["pass"], "text": r["text"], "spoken": r["spoken_text"],
+                           "heard_large": r["asr_text"], "heard_medium": r["asr_variants"]["medium.en"], "min_prob": g["lowest_prob"], "min_word": g["lowest_word"],
+                           "diffs_large": g["large_v3"]["diffs"], "diffs_medium": g["medium_en"]["diffs"], "word_probs": g["word_probs"], "timing": r["timing"]})
+          json.dump(rows, open(o + "/edge-report.json", "w"), indent=1)
+          PY
+          openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:EDGE_REPORT_PASS -in "$RUNNER_TEMP/edge-report.json" -out "$RUNNER_TEMP/edge-report.enc"
+      - name: Upload encrypted debug report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: edgereport-${{ inputs.label }}-ENC
+          path: ${{ runner.temp }}/edge-report.enc
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Encrypt pack (public repo)
         env:
           VOICEFREE_PASS: ${{ secrets.VOICEFREE_PASS }}
