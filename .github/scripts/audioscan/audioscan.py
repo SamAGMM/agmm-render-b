@@ -24,9 +24,31 @@ def spec(seg, sr, nfft=8192):
     for k, (a, b) in BANDS.items():
         m = (f >= a) & (f < b); out[k] = db(np.sqrt(2 * P[m].sum() / norm)) if m.any() else -180
     out["total"] = db(np.sqrt(np.mean(seg ** 2)) + 1e-12)
-    m = (f >= 2000) & (f < 12000); pp = P[m]; i = int(np.argmax(pp))
-    out["peak_hz"] = float(f[m][i]); out["tonal_db"] = float(10 * np.log10((pp[i] + 1e-12) / (np.median(pp) + 1e-12)))
+    m = (f >= 1500) & (f < 12000); pp = P[m]; ff = f[m]; i = int(np.argmax(pp)); f0 = ff[i]
+    nb = m.copy(); nb &= (np.abs(f - f0) <= 250) & (np.abs(f - f0) >= 40)
+    out["peak_hz"] = float(f0); out["tonal_db"] = float(10 * np.log10((pp[i] + 1e-12) / (np.mean(P[nb]) + 1e-12))) if nb.any() else 0.0
     return out
+
+def runs(rows, key="tonal_db", thr=20.0, minhi=-50.0, minlen=3):
+    res, cur = [], []
+    for r in rows + [None]:
+        if r is not None and r[key] >= thr and r["hi"] >= minhi and (not cur or abs(r["peak_hz"] - cur[-1]["peak_hz"]) < 120): cur.append(r); continue
+        if len(cur) >= minlen: res.append(cur)
+        cur = [r] if (r is not None and r[key] >= thr and r["hi"] >= minhi) else []
+    return res
+
+def stems_report(stemdir, L):
+    if not os.path.isdir(stemdir): L.append("no stems dir"); return
+    for fn in sorted(os.listdir(stemdir)):
+        if not fn.endswith(".wav"): continue
+        sr, x = load(os.path.join(stemdir, fn)); B = int(sr * 0.1); rows = []
+        for i in range(0, len(x) - B + 1, B):
+            s = spec(x[i:i + B], sr, 8192); s["t"] = round(i / sr, 2); rows.append(s)
+        L.append("== stem %s: %.1f s. median total %.1f hi %.1f air %.1f; loudest hi blocks:" % (fn, len(x) / sr, np.median([r["total"] for r in rows]), np.median([r["hi"] for r in rows]), np.median([r["air"] for r in rows])))
+        for r in sorted(rows, key=lambda r: -r["hi"])[:8]:
+            L.append("   t %6.2f total %6.1f lo %6.1f mid %6.1f hi %6.1f air %6.1f prom %5.1f dB at %6.0f Hz" % (r["t"], r["total"], r["lo"], r["mid"], r["hi"], r["air"], r["tonal_db"], r["peak_hz"]))
+        for rn in runs(rows, thr=18.0, minhi=-60.0)[:6]:
+            L.append("   sustained tone: %.1f-%.1f s around %.0f Hz (prom %.0f dB, hi %.1f dBFS)" % (rn[0]["t"], rn[-1]["t"] + 0.1, np.median([q["peak_hz"] for q in rn]), np.max([q["tonal_db"] for q in rn]), np.max([q["hi"] for q in rn])))
 
 def main(mix, mixjson, sfxdir, out):
     os.makedirs(out, exist_ok=True)
@@ -65,6 +87,10 @@ def main(mix, mixjson, sfxdir, out):
     L.append("-- mix clips ranked by estimated high-band level in the mix (file hi/air + gain) --")
     for v, nm, at, d, g, sp in sorted(res, key=lambda r: -r[0])[:30]:
         L.append("%-22s at %7.2f dur %5.2f gain %6.1f -> hi/air in mix %6.1f dBFS (file hi %6.1f air %6.1f tonal %5.1f at %5.0f Hz)" % (nm, at or 0, d, g, v, sp["hi"], sp["air"], sp["tonal_db"], sp["peak_hz"]))
+    L.append("-- sustained narrow tones in the mix (prominence >= 18 dB over the +-250 Hz neighbourhood, 3+ blocks) --")
+    for rn in runs(rows, thr=18.0, minhi=-60.0):
+        L.append("   %.1f-%.1f s around %.0f Hz prom %.0f dB hi %.1f dBFS" % (rn[0]["t"], rn[-1]["t"] + 0.1, np.median([q["peak_hz"] for q in rn]), np.max([q["tonal_db"] for q in rn]), np.max([q["hi"] for q in rn])))
+    stems_report(os.path.join(os.path.dirname(mix), "stems"), L)
     open(os.path.join(out, "audioscan.txt"), "w").write("\n".join(L) + "\n")
     print("\n".join(L))
 
