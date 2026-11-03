@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.artifact }}" -p "gate-input/mix.wav" -p "gate-input/stems/*" -D d
-          find d -type f | head
+          find d -type f -name '*.wav'
       - name: scan
         run: |
           python3 -m pip install --quiet numpy scipy
