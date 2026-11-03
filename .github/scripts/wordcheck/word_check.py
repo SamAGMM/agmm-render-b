@@ -476,6 +476,19 @@ def run_mix(a):
         subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", path, "-ar", "16000", "-ac", "1", w], check=True)
         path = w
     words = whisper_words(path, a.model)
+    try:       # V9 fix: Whisper can stop writing words well before the end of a mix with a loud music tail (H38: the CTA window came out empty). Transcribe the tail again on its own and merge.
+        import subprocess
+        tot = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path], capture_output=True, text=True).stdout.strip())
+        last_e = max([w["e"] for w in words] or [0.0])
+        if tot - last_e > 2.5:
+            t0 = max(0.0, last_e - 1.0); tail = path + ".tail.wav"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", "%.3f" % t0, "-i", path, "-ar", "16000", "-ac", "1", tail], check=True)
+            extra = [dict(w, s=w["s"] + t0, e=w["e"] + t0) for w in whisper_words(tail, a.model)]
+            words = [w for w in words if w["e"] <= last_e - 0.3] + [w for w in extra if w["s"] >= last_e - 0.3 or True][len([w for w in extra if w["e"] + 0 < 0]):]
+            words = sorted({(round(w["s"], 2), w["t"]): w for w in words}.values(), key=lambda w: w["s"])
+            print("tail re-transcribed from %.2f s: %d words total" % (t0, len(words)), flush=True)
+    except Exception as e:
+        print("tail fallback skipped:", e, flush=True)
     stem_runs = None
     if a.stem:                    # the voice stem (no music): energy silences are measurable there
         db, step, _dur = audio_facts(a.stem)
