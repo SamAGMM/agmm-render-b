@@ -76,6 +76,7 @@ jobs:
           python .github/scripts/voicefree/synth_v10.py --request "private/${{ inputs.request_path }}" --out "$RUNNER_TEMP/synth-out" --pub "$RUNNER_TEMP/pub-out"
       - name: Measure UTMOS and F0 (numbers only)
         if: inputs.measure == 'yes'
+        continue-on-error: true
         run: |
           set -euo pipefail
           python -m pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
