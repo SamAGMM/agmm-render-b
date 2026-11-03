@@ -1,0 +1,73 @@
+name: AGMM audio scan
+run-name: AGMM audio scan ${{ inputs.label }}
+# Where is the screech? (Hail Mary, 3 Nov 2026) Per-100 ms high-band levels and tonality of a FINAL MIX (gate-input/mix.wav of a par run artifact) and, for a film that synthesises its own
+# effects (lift_sfx.py / apollo_sfx.py style make_all), the high-band share of every effect and of every mix clip. Numbers only leave the runner.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id: { description: par run id (this repo), required: true }
+      artifact: { description: artifact name (hailmary-<label>), required: true }
+      private_commit: { description: 40-hex commit of agmm-video-render holding the film, required: true }
+      project_path: { description: film folder, required: true }
+      sfx_module: { description: 'python module with make_all(out_dir, bed_len), e.g. apollo_sfx', required: false, default: '' }
+      bed_len: { description: 'bed_len passed to make_all', required: false, default: '26.0' }
+      label: { description: short label, required: true }
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agmm-audioscan-${{ inputs.label }}
+  cancel-in-progress: false
+jobs:
+  scan:
+    if: github.repository == 'SamAGMM/agmm-render-b'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/scripts/audioscan
+      - name: Fetch the film (read-only deploy key)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: agmmltd-arch/agmm-video-render
+          ref: ${{ inputs.private_commit }}
+          ssh-key: ${{ secrets.AGMM_SFX_READ_DEPLOY_KEY }}
+          path: private
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: python3 -m pip install --quiet --retries 4 numpy scipy
+      - name: The mix and its clip list
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -n "${{ inputs.artifact }}" -D art
+          ls art art/gate-input art/qa | head -40
+      - name: Synthesise the film's effects
+        if: inputs.sfx_module != ''
+        run: |
+          set -euo pipefail
+          cd "private/${{ inputs.project_path }}"
+          python3 -c "import ${{ inputs.sfx_module }} as m; m.make_all('$GITHUB_WORKSPACE/sfx', bed_len=float('${{ inputs.bed_len }}'))" | tail -3
+          mkdir -p "$GITHUB_WORKSPACE/sfx"
+      - name: Scan
+        run: |
+          set -euo pipefail
+          mkdir -p sfx out
+          python3 .github/scripts/audioscan/audioscan.py art/gate-input/mix.wav art/qa/mix.json sfx out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: audioscan-${{ inputs.label }}
+          path: out
+          retention-days: 3
